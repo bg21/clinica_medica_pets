@@ -266,12 +266,19 @@ async function apiRequest(endpoint, options = {}) {
         }
     }
     
+    // Detecta se é FormData
+    const isFormData = options.isFormData || (options.body instanceof FormData);
+    
     const defaultOptions = {
         headers: {
-            'Authorization': 'Bearer ' + SESSION_ID,
-            'Content-Type': 'application/json'
+            'Authorization': 'Bearer ' + SESSION_ID
         }
     };
+    
+    // Só adiciona Content-Type se não for FormData (o navegador adiciona automaticamente)
+    if (!isFormData) {
+        defaultOptions.headers['Content-Type'] = 'application/json';
+    }
     
     const mergedOptions = {
         ...defaultOptions,
@@ -281,6 +288,11 @@ async function apiRequest(endpoint, options = {}) {
             ...(options.headers || {})
         }
     };
+    
+    // Remove Content-Type se for FormData (deixa o navegador definir)
+    if (isFormData && mergedOptions.headers['Content-Type']) {
+        delete mergedOptions.headers['Content-Type'];
+    }
     
     // ✅ OTIMIZAÇÃO: Retry automático para falhas de rede
     let retries = options.retries || 0;

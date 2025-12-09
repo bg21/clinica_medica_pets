@@ -260,6 +260,12 @@ $showSaaSFeatures = ($user['role'] ?? '') === 'admin';
                     <span class="nav-section-title">Clínica Veterinária</span>
                     <ul class="nav-menu">
                         <li class="nav-item">
+                            <a href="/clinic/dashboard" class="nav-link <?php echo ($currentPage ?? '') === 'clinic-dashboard' ? 'active' : ''; ?>">
+                                <i class="bi bi-speedometer2"></i>
+                                <span>Dashboard</span>
+                            </a>
+                        </li>
+                        <li class="nav-item">
                             <a href="/clinic/pets" class="nav-link <?php echo ($currentPage ?? '') === 'clinic-pets' ? 'active' : ''; ?>">
                                 <i class="bi bi-heart-pulse"></i>
                                 <span>Pets</span>
@@ -284,9 +290,21 @@ $showSaaSFeatures = ($user['role'] ?? '') === 'admin';
                             </a>
                         </li>
                         <li class="nav-item">
+                            <a href="/clinic/search" class="nav-link <?php echo ($currentPage ?? '') === 'clinic-search' ? 'active' : ''; ?>">
+                                <i class="bi bi-search"></i>
+                                <span>Busca Avançada</span>
+                            </a>
+                        </li>
+                        <li class="nav-item">
                             <a href="/clinic/appointments" class="nav-link <?php echo ($currentPage ?? '') === 'clinic-appointments' ? 'active' : ''; ?>">
                                 <i class="bi bi-calendar-check"></i>
                                 <span>Agendamentos</span>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a href="/clinic/exams" class="nav-link <?php echo ($currentPage ?? '') === 'clinic-exams' ? 'active' : ''; ?>">
+                                <i class="bi bi-clipboard-pulse"></i>
+                                <span>Exames</span>
                             </a>
                         </li>
                         <li class="nav-item">

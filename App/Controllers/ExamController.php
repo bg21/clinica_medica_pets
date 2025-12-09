@@ -1,0 +1,541 @@
+<?php
+
+namespace App\Controllers;
+
+use App\Models\Exam;
+use App\Models\ExamType;
+use App\Models\Pet;
+use App\Models\Customer;
+use App\Models\Professional;
+use App\Services\ExamService;
+use App\Utils\PermissionHelper;
+use App\Utils\ResponseHelper;
+use Flight;
+
+/**
+ * Controller para gerenciar exames
+ */
+class ExamController
+{
+    private ExamService $examService;
+
+    public function __construct(ExamService $examService)
+    {
+        $this->examService = $examService;
+    }
+
+    /**
+     * Cria um novo exame
+     * POST /v1/clinic/exams
+     */
+    public function create(): void
+    {
+        try {
+            PermissionHelper::require('create_exams');
+            
+            $tenantId = Flight::get('tenant_id');
+            
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_exam']);
+                return;
+            }
+            
+            $data = \App\Utils\RequestCache::getJsonInput();
+            
+            if ($data === null && json_last_error() !== JSON_ERROR_NONE) {
+                ResponseHelper::sendInvalidJsonError(['action' => 'create_exam']);
+                return;
+            }
+            
+            // Validação básica
+            if (empty($data['pet_id']) || empty($data['client_id']) || empty($data['exam_date'])) {
+                ResponseHelper::sendValidationError(
+                    'Dados inválidos',
+                    [
+                        'pet_id' => 'Obrigatório',
+                        'client_id' => 'Obrigatório',
+                        'exam_date' => 'Obrigatório'
+                    ],
+                    ['action' => 'create_exam']
+                );
+                return;
+            }
+            
+            // Extrai price_id e auto_charge se fornecidos
+            $priceId = $data['price_id'] ?? null;
+            $autoCharge = isset($data['auto_charge']) ? (bool)$data['auto_charge'] : false;
+            
+            // Remove campos que não são do exame
+            unset($data['price_id'], $data['auto_charge']);
+            
+            // Cria exame com integração de pagamento (se price_id fornecido)
+            $result = $this->examService->createExamWithPayment(
+                $tenantId,
+                $data,
+                $priceId,
+                $autoCharge
+            );
+            
+            $responseData = $result['exam'];
+            if ($result['invoice']) {
+                $responseData['invoice'] = $result['invoice'];
+            }
+            
+            ResponseHelper::sendCreated($responseData, 'Exame criado com sucesso');
+        } catch (\InvalidArgumentException $e) {
+            ResponseHelper::sendValidationError(
+                $e->getMessage(),
+                [],
+                ['action' => 'create_exam']
+            );
+        } catch (\RuntimeException $e) {
+            ResponseHelper::sendGenericError(
+                $e,
+                $e->getMessage(),
+                'EXAM_CREATE_ERROR',
+                ['action' => 'create_exam', 'tenant_id' => $tenantId ?? null]
+            );
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError(
+                $e,
+                'Erro ao criar exame',
+                'EXAM_CREATE_ERROR',
+                ['action' => 'create_exam', 'tenant_id' => $tenantId ?? null]
+            );
+        }
+    }
+
+    /**
+     * Lista exames do tenant
+     * GET /v1/clinic/exams
+     */
+    public function list(): void
+    {
+        try {
+            PermissionHelper::require('view_exams');
+            
+            $tenantId = Flight::get('tenant_id');
+            
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_exams']);
+                return;
+            }
+            
+            $queryParams = Flight::request()->query;
+            $page = isset($queryParams['page']) ? max(1, (int)$queryParams['page']) : 1;
+            $limit = isset($queryParams['limit']) ? min(100, max(1, (int)$queryParams['limit'])) : 20;
+            
+            $filters = [];
+            if (!empty($queryParams['status'])) {
+                $filters['status'] = $queryParams['status'];
+            }
+            if (!empty($queryParams['pet_id'])) {
+                $filters['pet_id'] = (int)$queryParams['pet_id'];
+            }
+            if (!empty($queryParams['professional_id'])) {
+                $filters['professional_id'] = (int)$queryParams['professional_id'];
+            }
+            if (!empty($queryParams['exam_type_id'])) {
+                $filters['exam_type_id'] = (int)$queryParams['exam_type_id'];
+            }
+            if (!empty($queryParams['client_id'])) {
+                $filters['client_id'] = (int)$queryParams['client_id'];
+            }
+            if (!empty($queryParams['date_from'])) {
+                $filters['date_from'] = $queryParams['date_from'];
+            }
+            if (!empty($queryParams['date_to'])) {
+                $filters['date_to'] = $queryParams['date_to'];
+            }
+            if (!empty($queryParams['sort'])) {
+                $filters['sort'] = $queryParams['sort'];
+                $filters['direction'] = $queryParams['direction'] ?? 'DESC';
+            }
+            
+            $examModel = new Exam();
+            $result = $examModel->findByTenant($tenantId, $page, $limit, $filters);
+
+            $responseData = [
+                'exams' => $result['data'],
+                'meta' => [
+                    'total' => $result['total'],
+                    'page' => $result['page'],
+                    'limit' => $result['limit'],
+                    'total_pages' => $result['total_pages']
+                ]
+            ];
+            
+            ResponseHelper::sendSuccess($responseData['exams'], 200, null, $responseData['meta']);
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError(
+                $e,
+                'Erro ao listar exames',
+                'EXAM_LIST_ERROR',
+                ['action' => 'list_exams', 'tenant_id' => $tenantId ?? null]
+            );
+        }
+    }
+
+    /**
+     * Obtém exame por ID
+     * GET /v1/clinic/exams/:id
+     */
+    public function get(string $id): void
+    {
+        try {
+            PermissionHelper::require('view_exams');
+            
+            $tenantId = Flight::get('tenant_id');
+            
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_exam', 'exam_id' => $id]);
+                return;
+            }
+
+            $examModel = new Exam();
+            $exam = $examModel->findByTenantAndId($tenantId, (int)$id);
+
+            if (!$exam) {
+                ResponseHelper::sendNotFoundError('Exame', ['action' => 'get_exam', 'exam_id' => $id, 'tenant_id' => $tenantId]);
+                return;
+            }
+
+            ResponseHelper::sendSuccess($exam);
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError(
+                $e,
+                'Erro ao obter exame',
+                'EXAM_GET_ERROR',
+                ['action' => 'get_exam', 'exam_id' => $id, 'tenant_id' => $tenantId ?? null]
+            );
+        }
+    }
+
+    /**
+     * Atualiza um exame
+     * PUT /v1/clinic/exams/:id
+     */
+    public function update(string $id): void
+    {
+        try {
+            PermissionHelper::require('update_exams');
+            
+            $tenantId = Flight::get('tenant_id');
+            
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'update_exam', 'exam_id' => $id]);
+                return;
+            }
+            
+            $data = \App\Utils\RequestCache::getJsonInput();
+            
+            if ($data === null && json_last_error() !== JSON_ERROR_NONE) {
+                ResponseHelper::sendInvalidJsonError(['action' => 'update_exam', 'exam_id' => $id]);
+                return;
+            }
+            
+            $examModel = new Exam();
+            $examModel->updateExam($tenantId, (int)$id, $data);
+            $exam = $examModel->findById((int)$id);
+            
+            ResponseHelper::sendSuccess($exam, 'Exame atualizado com sucesso');
+        } catch (\RuntimeException $e) {
+            ResponseHelper::sendGenericError(
+                $e,
+                $e->getMessage(),
+                'EXAM_UPDATE_ERROR',
+                ['action' => 'update_exam', 'exam_id' => $id, 'tenant_id' => $tenantId ?? null]
+            );
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError(
+                $e,
+                'Erro ao atualizar exame',
+                'EXAM_UPDATE_ERROR',
+                ['action' => 'update_exam', 'exam_id' => $id, 'tenant_id' => $tenantId ?? null]
+            );
+        }
+    }
+
+    /**
+     * Deleta um exame (soft delete)
+     * DELETE /v1/clinic/exams/:id
+     */
+    public function delete(string $id): void
+    {
+        try {
+            PermissionHelper::require('delete_exams');
+            
+            $tenantId = Flight::get('tenant_id');
+            
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'delete_exam', 'exam_id' => $id]);
+                return;
+            }
+
+            $examModel = new Exam();
+            $exam = $examModel->findByTenantAndId($tenantId, (int)$id);
+
+            if (!$exam) {
+                ResponseHelper::sendNotFoundError('Exame', ['action' => 'delete_exam', 'exam_id' => $id, 'tenant_id' => $tenantId]);
+                return;
+            }
+            
+            $examModel->delete((int)$id);
+            
+            ResponseHelper::sendSuccess(null, 'Exame deletado com sucesso');
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError(
+                $e,
+                'Erro ao deletar exame',
+                'EXAM_DELETE_ERROR',
+                ['action' => 'delete_exam', 'exam_id' => $id, 'tenant_id' => $tenantId ?? null]
+            );
+        }
+    }
+
+    /**
+     * Lista exames por pet
+     * GET /v1/clinic/exams/pet/:pet_id
+     */
+    public function listByPet(string $petId): void
+    {
+        try {
+            PermissionHelper::require('view_exams');
+            
+            $tenantId = Flight::get('tenant_id');
+            
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_exams_by_pet', 'pet_id' => $petId]);
+                return;
+            }
+            
+            // Verifica se pet existe e pertence ao tenant
+            $petModel = new Pet();
+            $pet = $petModel->findByTenantAndId($tenantId, (int)$petId);
+            
+            if (!$pet) {
+                ResponseHelper::sendNotFoundError('Pet', ['action' => 'list_exams_by_pet', 'pet_id' => $petId]);
+                return;
+            }
+            
+            $examModel = new Exam();
+            $exams = $examModel->findByPet($tenantId, (int)$petId);
+            
+            ResponseHelper::sendSuccess($exams);
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError(
+                $e,
+                'Erro ao listar exames do pet',
+                'EXAM_LIST_BY_PET_ERROR',
+                ['action' => 'list_exams_by_pet', 'pet_id' => $petId, 'tenant_id' => $tenantId ?? null]
+            );
+        }
+    }
+
+    /**
+     * Lista exames por profissional
+     * GET /v1/clinic/exams/professional/:professional_id
+     */
+    public function listByProfessional(string $professionalId): void
+    {
+        try {
+            PermissionHelper::require('view_exams');
+            
+            $tenantId = Flight::get('tenant_id');
+            
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_exams_by_professional', 'professional_id' => $professionalId]);
+                return;
+            }
+            
+            // Verifica se profissional existe e pertence ao tenant
+            $professionalModel = new Professional();
+            $professional = $professionalModel->findByTenantAndId($tenantId, (int)$professionalId);
+            
+            if (!$professional) {
+                ResponseHelper::sendNotFoundError('Profissional', ['action' => 'list_exams_by_professional', 'professional_id' => $professionalId]);
+                return;
+            }
+            
+            $queryParams = Flight::request()->query;
+            $date = $queryParams['date'] ?? null;
+            
+            $examModel = new Exam();
+            $exams = $examModel->findByProfessional($tenantId, (int)$professionalId, $date);
+            
+            ResponseHelper::sendSuccess($exams);
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError(
+                $e,
+                'Erro ao listar exames do profissional',
+                'EXAM_LIST_BY_PROFESSIONAL_ERROR',
+                ['action' => 'list_exams_by_professional', 'professional_id' => $professionalId, 'tenant_id' => $tenantId ?? null]
+            );
+        }
+    }
+
+    /**
+     * Processa pagamento de um exame existente
+     * POST /v1/clinic/exams/:id/pay
+     */
+    public function pay(string $id): void
+    {
+        try {
+            PermissionHelper::require('update_exams');
+            
+            $tenantId = Flight::get('tenant_id');
+            
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'pay_exam', 'exam_id' => $id]);
+                return;
+            }
+            
+            $data = \App\Utils\RequestCache::getJsonInput();
+            
+            if ($data === null && json_last_error() !== JSON_ERROR_NONE) {
+                ResponseHelper::sendInvalidJsonError(['action' => 'pay_exam', 'exam_id' => $id]);
+                return;
+            }
+            
+            if (empty($data['price_id'])) {
+                ResponseHelper::sendValidationError(
+                    'Dados inválidos',
+                    ['price_id' => 'Obrigatório'],
+                    ['action' => 'pay_exam', 'exam_id' => $id]
+                );
+                return;
+            }
+            
+            $autoCharge = isset($data['auto_charge']) ? (bool)$data['auto_charge'] : false;
+            
+            $result = $this->examService->processExamPayment(
+                $tenantId,
+                (int)$id,
+                $data['price_id'],
+                $autoCharge
+            );
+            
+            ResponseHelper::sendSuccess($result, 'Pagamento processado com sucesso');
+        } catch (\RuntimeException $e) {
+            ResponseHelper::sendGenericError(
+                $e,
+                $e->getMessage(),
+                'EXAM_PAY_ERROR',
+                ['action' => 'pay_exam', 'exam_id' => $id, 'tenant_id' => $tenantId ?? null]
+            );
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError(
+                $e,
+                'Erro ao processar pagamento',
+                'EXAM_PAY_ERROR',
+                ['action' => 'pay_exam', 'exam_id' => $id, 'tenant_id' => $tenantId ?? null]
+            );
+        }
+    }
+
+    /**
+     * Obtém invoice de um exame
+     * GET /v1/clinic/exams/:id/invoice
+     */
+    public function getInvoice(string $id): void
+    {
+        try {
+            PermissionHelper::require('view_exams');
+            
+            $tenantId = Flight::get('tenant_id');
+            
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_exam_invoice', 'exam_id' => $id]);
+                return;
+            }
+            
+            $invoice = $this->examService->getExamInvoice($tenantId, (int)$id);
+            
+            if (!$invoice) {
+                ResponseHelper::sendNotFoundError('Invoice', ['action' => 'get_exam_invoice', 'exam_id' => $id]);
+                return;
+            }
+            
+            ResponseHelper::sendSuccess($invoice);
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError(
+                $e,
+                'Erro ao obter invoice do exame',
+                'EXAM_INVOICE_GET_ERROR',
+                ['action' => 'get_exam_invoice', 'exam_id' => $id, 'tenant_id' => $tenantId ?? null]
+            );
+        }
+    }
+}
+
+/**
+ * Controller para gerenciar tipos de exames
+ */
+class ExamTypeController
+{
+    /**
+     * Lista tipos de exame ativos do tenant
+     * GET /v1/clinic/exam-types
+     */
+    public function list(): void
+    {
+        try {
+            PermissionHelper::require('view_exams');
+            
+            $tenantId = Flight::get('tenant_id');
+            
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_exam_types']);
+                return;
+            }
+            
+            $examTypeModel = new ExamType();
+            $examTypes = $examTypeModel->findActiveByTenant($tenantId);
+            
+            ResponseHelper::sendSuccess($examTypes);
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError(
+                $e,
+                'Erro ao listar tipos de exame',
+                'EXAM_TYPE_LIST_ERROR',
+                ['action' => 'list_exam_types', 'tenant_id' => $tenantId ?? null]
+            );
+        }
+    }
+
+    /**
+     * Obtém tipo de exame por ID
+     * GET /v1/clinic/exam-types/:id
+     */
+    public function get(string $id): void
+    {
+        try {
+            PermissionHelper::require('view_exams');
+            
+            $tenantId = Flight::get('tenant_id');
+            
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_exam_type', 'exam_type_id' => $id]);
+                return;
+            }
+
+            $examTypeModel = new ExamType();
+            $examType = $examTypeModel->findByTenantAndId($tenantId, (int)$id);
+
+            if (!$examType) {
+                ResponseHelper::sendNotFoundError('Tipo de exame', ['action' => 'get_exam_type', 'exam_type_id' => $id, 'tenant_id' => $tenantId]);
+                return;
+            }
+
+            ResponseHelper::sendSuccess($examType);
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError(
+                $e,
+                'Erro ao obter tipo de exame',
+                'EXAM_TYPE_GET_ERROR',
+                ['action' => 'get_exam_type', 'exam_type_id' => $id, 'tenant_id' => $tenantId ?? null]
+            );
+        }
+    }
+}
+

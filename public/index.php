@@ -65,6 +65,31 @@ if (preg_match('/^\/app\//', $requestUri)) {
     exit;
 }
 
+// Servir arquivos estáticos da pasta /img (imagens padrão)
+if (preg_match('/^\/img\//', $requestUri)) {
+    $filePath = __DIR__ . $requestUri;
+    
+    if (file_exists($filePath) && is_file($filePath)) {
+        $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
+        
+        $mimeTypes = [
+            'png' => 'image/png',
+            'jpg' => 'image/jpeg',
+            'jpeg' => 'image/jpeg',
+            'gif' => 'image/gif',
+            'webp' => 'image/webp',
+            'svg' => 'image/svg+xml',
+            'ico' => 'image/x-icon'
+        ];
+        
+        header('Content-Type: ' . ($mimeTypes[$ext] ?? 'application/octet-stream'));
+        header('Cache-Control: public, max-age=2592000'); // 1 mês
+        header('Expires: ' . gmdate('D, d M Y H:i:s', time() + 2592000) . ' GMT');
+        readfile($filePath);
+        exit;
+    }
+}
+
 // Servir arquivos da pasta /storage (logos, documentos, etc)
 if (preg_match('/^\/storage\//', $requestUri)) {
     $filePath = __DIR__ . '/..' . $requestUri;
@@ -294,7 +319,7 @@ $app->before('start', function() use ($app) {
         // Rotas de administração (verificam autenticação individualmente)
         '/traces', '/performance-metrics',
         // Rotas de Clínica Veterinária (verificam autenticação individualmente)
-        '/clinic/pets', '/clinic/professionals', '/clinic/specialties', '/clinic/professional-schedule', '/clinic/appointments', '/clinic/reports', '/schedule', '/clinic-settings'
+        '/clinic/dashboard', '/clinic/pets', '/clinic/professionals', '/clinic/specialties', '/clinic/professional-schedule', '/clinic/appointments', '/clinic/exams', '/clinic/reports', '/clinic/search', '/schedule', '/clinic-settings'
     ];
     $requestUri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
     
@@ -1273,6 +1298,24 @@ $app->route('GET /clinic/appointments', function() use ($app) {
     ], true);
 });
 
+$app->route('GET /clinic/exams', function() use ($app) {
+    [$user, $tenant, $sessionId] = getAuthenticatedUserData();
+    $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
+    \App\Utils\View::render('clinic/exams', [
+        'apiUrl' => $apiUrl,
+        'user' => $user,
+        'tenant' => $tenant,
+        'title' => 'Exames',
+        'currentPage' => 'clinic-exams'
+    ], true);
+});
+
 $app->route('GET /clinic/specialties', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
@@ -1288,6 +1331,24 @@ $app->route('GET /clinic/specialties', function() use ($app) {
         'tenant' => $tenant,
         'title' => 'Especialidades',
         'currentPage' => 'clinic-specialties'
+    ], true);
+});
+
+$app->route('GET /clinic/dashboard', function() use ($app) {
+    [$user, $tenant, $sessionId] = getAuthenticatedUserData();
+    $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
+    \App\Utils\View::render('clinic/dashboard', [
+        'apiUrl' => $apiUrl,
+        'user' => $user,
+        'tenant' => $tenant,
+        'title' => 'Dashboard da Clínica',
+        'currentPage' => 'clinic-dashboard'
     ], true);
 });
 
@@ -1703,6 +1764,23 @@ $app->route('GET /v1/clinic/appointments/professional/@professional_id', [$appoi
 $app->route('POST /v1/clinic/appointments/@id/pay', [$appointmentController, 'pay']);
 $app->route('GET /v1/clinic/appointments/@id/invoice', [$appointmentController, 'getInvoice']);
 
+// Rotas de Exames
+$examController = $container->make(\App\Controllers\ExamController::class);
+$examTypeController = $container->make(\App\Controllers\ExamTypeController::class);
+$app->route('POST /v1/clinic/exams', [$examController, 'create']);
+$app->route('GET /v1/clinic/exams', [$examController, 'list']);
+$app->route('GET /v1/clinic/exams/@id', [$examController, 'get']);
+$app->route('PUT /v1/clinic/exams/@id', [$examController, 'update']);
+$app->route('DELETE /v1/clinic/exams/@id', [$examController, 'delete']);
+$app->route('GET /v1/clinic/exams/pet/@pet_id', [$examController, 'listByPet']);
+$app->route('GET /v1/clinic/exams/professional/@professional_id', [$examController, 'listByProfessional']);
+$app->route('POST /v1/clinic/exams/@id/pay', [$examController, 'pay']);
+$app->route('GET /v1/clinic/exams/@id/invoice', [$examController, 'getInvoice']);
+
+// Rotas de Tipos de Exame
+$app->route('GET /v1/clinic/exam-types', [$examTypeController, 'list']);
+$app->route('GET /v1/clinic/exam-types/@id', [$examTypeController, 'get']);
+
 $professionalScheduleController = $container->make(\App\Controllers\ProfessionalScheduleController::class);
 $app->route('GET /v1/clinic/professionals/@id/schedule', [$professionalScheduleController, 'getSchedule']);
 $app->route('POST /v1/clinic/professionals/@id/schedule', [$professionalScheduleController, 'saveSchedule']);
@@ -1716,6 +1794,16 @@ $app->route('GET /v1/clinic/configuration', [$clinicController, 'getConfiguratio
 $app->route('PUT /v1/clinic/configuration', [$clinicController, 'updateConfiguration']);
 $app->route('POST /v1/clinic/logo', [$clinicController, 'uploadLogo']);
 
+// Rotas de Dashboard da Clínica
+$clinicDashboardController = $container->make(\App\Controllers\ClinicDashboardController::class);
+$app->route('GET /v1/clinic/dashboard/kpis', [$clinicDashboardController, 'getKPIs']);
+$app->route('GET /v1/clinic/dashboard/appointments-stats', [$clinicDashboardController, 'getAppointmentsStats']);
+$app->route('GET /v1/clinic/dashboard/upcoming-appointments', [$clinicDashboardController, 'getUpcomingAppointments']);
+
+// Rotas de Busca Avançada
+$searchController = $container->make(\App\Controllers\SearchController::class);
+$app->route('GET /v1/clinic/search', [$searchController, 'globalSearch']);
+
 // Rotas de Relatórios da Clínica
 $clinicReportController = $container->make(\App\Controllers\ClinicReportController::class);
 $app->route('GET /v1/clinic/reports/appointments', [$clinicReportController, 'appointmentsReport']);
@@ -1723,6 +1811,13 @@ $app->route('GET /v1/clinic/reports/exams', [$clinicReportController, 'examsRepo
 $app->route('GET /v1/clinic/reports/vaccinations', [$clinicReportController, 'vaccinationsReport']);
 $app->route('GET /v1/clinic/reports/financial', [$clinicReportController, 'financialReport']);
 $app->route('GET /v1/clinic/reports/top-pets', [$clinicReportController, 'topPetsReport']);
+
+// Rotas de Upload de Arquivos
+$fileController = $container->make(\App\Controllers\FileController::class);
+$app->route('POST /v1/files/pets/@id/photo', [$fileController, 'uploadPetPhoto']);
+$app->route('DELETE /v1/files/pets/@id/photo', [$fileController, 'deletePetPhoto']);
+$app->route('POST /v1/files/customers/@id/photo', [$fileController, 'uploadCustomerPhoto']);
+$app->route('POST /v1/files/professionals/@id/photo', [$fileController, 'uploadProfessionalPhoto']);
 
 // View de Relatórios da Clínica
 $app->route('GET /clinic/reports', function() use ($app) {
@@ -1737,6 +1832,22 @@ $app->route('GET /clinic/reports', function() use ($app) {
     \App\Utils\View::render('clinic/reports', [
         'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
         'title' => 'Relatórios da Clínica', 'currentPage' => 'clinic-reports'
+    ], true);
+});
+
+// View de Busca Avançada
+$app->route('GET /clinic/search', function() use ($app) {
+    [$user, $tenant, $sessionId] = getAuthenticatedUserData();
+    $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
+    \App\Utils\View::render('clinic/search', [
+        'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
+        'title' => 'Busca Avançada', 'currentPage' => 'clinic-search'
     ], true);
 });
 

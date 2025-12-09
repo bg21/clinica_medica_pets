@@ -125,6 +125,27 @@
                         Campos marcados com <span class="text-danger">*</span> são obrigatórios.
                     </div>
                     
+                    <!-- Foto do Pet -->
+                    <div class="mb-4 text-center">
+                        <label class="form-label d-block">
+                            <i class="bi bi-camera me-1"></i>
+                            Foto do Pet
+                        </label>
+                        <div class="mb-2">
+                            <img id="createPetPhotoPreview" src="/img/default-pet.svg" alt="Foto do Pet" 
+                                 class="img-thumbnail" style="width: 150px; height: 150px; object-fit: cover; cursor: pointer;"
+                                 onclick="document.getElementById('createPetPhotoInput').click()">
+                        </div>
+                        <input type="file" id="createPetPhotoInput" accept="image/jpeg,image/png,image/gif,image/webp" 
+                               style="display: none;" onchange="handlePetPhotoPreview('createPetPhotoInput', 'createPetPhotoPreview')">
+                        <button type="button" class="btn btn-sm btn-outline-primary" onclick="document.getElementById('createPetPhotoInput').click()">
+                            <i class="bi bi-upload"></i> Escolher Foto
+                        </button>
+                        <button type="button" class="btn btn-sm btn-outline-danger" id="removeCreatePetPhotoBtn" style="display: none;" onclick="removePetPhoto('createPetPhotoInput', 'createPetPhotoPreview')">
+                            <i class="bi bi-trash"></i> Remover
+                        </button>
+                    </div>
+                    
                     <div class="row">
                         <div class="col-md-6 mb-3">
                             <label class="form-label">
@@ -326,6 +347,27 @@
             <form id="editPetForm" novalidate>
                 <input type="hidden" id="editPetId" name="id">
                 <div class="modal-body">
+                    <!-- Foto do Pet -->
+                    <div class="mb-4 text-center">
+                        <label class="form-label d-block">
+                            <i class="bi bi-camera me-1"></i>
+                            Foto do Pet
+                        </label>
+                        <div class="mb-2">
+                            <img id="editPetPhotoPreview" src="/img/default-pet.svg" alt="Foto do Pet" 
+                                 class="img-thumbnail" style="width: 150px; height: 150px; object-fit: cover; cursor: pointer;"
+                                 onclick="document.getElementById('editPetPhotoInput').click()">
+                        </div>
+                        <input type="file" id="editPetPhotoInput" accept="image/jpeg,image/png,image/gif,image/webp" 
+                               style="display: none;" onchange="handlePetPhotoPreview('editPetPhotoInput', 'editPetPhotoPreview')">
+                        <button type="button" class="btn btn-sm btn-outline-primary" onclick="document.getElementById('editPetPhotoInput').click()">
+                            <i class="bi bi-upload"></i> Escolher Foto
+                        </button>
+                        <button type="button" class="btn btn-sm btn-outline-danger" id="removeEditPetPhotoBtn" style="display: none;" onclick="removePetPhoto('editPetPhotoInput', 'editPetPhotoPreview')">
+                            <i class="bi bi-trash"></i> Remover
+                        </button>
+                    </div>
+                    
                     <div class="row">
                         <div class="col-md-6 mb-3">
                             <label class="form-label">
@@ -648,6 +690,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 
                 showAlert('Pet criado com sucesso!', 'success');
+                
+                // Upload de foto se houver
+                const photoInput = document.getElementById('createPetPhotoInput');
+                if (photoInput && photoInput.files && photoInput.files.length > 0) {
+                    await uploadPetPhoto(response.data.id, photoInput.files[0]);
+                }
+                
                 bootstrap.Modal.getInstance(document.getElementById('createPetModal')).hide();
                 loadPets();
             } catch (error) {
@@ -724,6 +773,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 
                 showAlert('Pet atualizado com sucesso!', 'success');
+                
+                // Upload de foto se houver
+                const photoInput = document.getElementById('editPetPhotoInput');
+                if (photoInput && photoInput.files && photoInput.files.length > 0) {
+                    await uploadPetPhoto(petId, photoInput.files[0]);
+                }
+                
                 bootstrap.Modal.getInstance(document.getElementById('editPetModal')).hide();
                 loadPets();
             } catch (error) {
@@ -937,6 +993,15 @@ async function editPet(id) {
         document.getElementById('editPetNotes').value = pet.notes || '';
         document.getElementById('editNotesCounter').textContent = (pet.notes || '').length;
         
+        // Atualiza foto do pet
+        if (pet.photo_url) {
+            document.getElementById('editPetPhotoPreview').src = '/' + pet.photo_url;
+            document.getElementById('removeEditPetPhotoBtn').style.display = 'inline-block';
+        } else {
+            document.getElementById('editPetPhotoPreview').src = '/img/default-pet.svg';
+            document.getElementById('removeEditPetPhotoBtn').style.display = 'none';
+        }
+        
         // Atualiza select de clientes
         const select = document.getElementById('editPetCustomerId');
         if (select) {
@@ -1009,6 +1074,56 @@ function showConfirmModal(message, title, buttonText, buttonClass) {
             resolve(false);
         }, { once: true });
     });
+}
+
+// Funções para upload de foto
+function handlePetPhotoPreview(inputId, previewId) {
+    const input = document.getElementById(inputId);
+    const preview = document.getElementById(previewId);
+    const removeBtn = inputId === 'createPetPhotoInput' 
+        ? document.getElementById('removeCreatePetPhotoBtn')
+        : document.getElementById('removeEditPetPhotoBtn');
+    
+    if (input.files && input.files[0]) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            preview.src = e.target.result;
+            if (removeBtn) removeBtn.style.display = 'inline-block';
+        };
+        reader.readAsDataURL(input.files[0]);
+    }
+}
+
+function removePetPhoto(inputId, previewId) {
+    const input = document.getElementById(inputId);
+    const preview = document.getElementById(previewId);
+    const removeBtn = inputId === 'createPetPhotoInput' 
+        ? document.getElementById('removeCreatePetPhotoBtn')
+        : document.getElementById('removeEditPetPhotoBtn');
+    
+    input.value = '';
+    preview.src = '/img/default-pet.svg';
+    if (removeBtn) removeBtn.style.display = 'none';
+}
+
+async function uploadPetPhoto(petId, file) {
+    try {
+        const formData = new FormData();
+        formData.append('photo', file);
+        
+        const response = await apiRequest(`/v1/files/pets/${petId}/photo`, {
+            method: 'POST',
+            body: formData,
+            isFormData: true
+        });
+        
+        if (response && response.data) {
+            console.log('Foto do pet enviada com sucesso');
+        }
+    } catch (error) {
+        console.error('Erro ao fazer upload da foto:', error);
+        showAlert('Erro ao fazer upload da foto: ' + (error.message || 'Erro desconhecido'), 'warning');
+    }
 }
 </script>
 

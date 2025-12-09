@@ -345,7 +345,7 @@ class Professional extends BaseModel
         }
         
         $updateData = [];
-        $allowedFields = ['name', 'crmv', 'cpf', 'specialty', 'phone', 'email', 'status', 'user_id', 'professional_role_id', 'default_price_id'];
+        $allowedFields = ['name', 'crmv', 'cpf', 'specialty', 'phone', 'email', 'status', 'user_id', 'professional_role_id', 'default_price_id', 'photo_url'];
         
         foreach ($allowedFields as $field) {
             if (isset($data[$field])) {

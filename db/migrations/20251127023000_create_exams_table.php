@@ -70,7 +70,7 @@ final class CreateExamsTable extends AbstractMigration
                   'update' => 'CASCADE',
                   'constraint' => 'fk_exam_pet'
               ])
-              ->addForeignKey('client_id', 'clients', 'id', [
+              ->addForeignKey('client_id', 'customers', 'id', [
                   'delete' => 'CASCADE',
                   'update' => 'CASCADE',
                   'constraint' => 'fk_exam_client'

@@ -121,6 +121,27 @@
                         Campos marcados com <span class="text-danger">*</span> são obrigatórios.
                     </div>
                     
+                    <!-- Foto do Profissional -->
+                    <div class="mb-4 text-center">
+                        <label class="form-label d-block">
+                            <i class="bi bi-camera me-1"></i>
+                            Foto do Profissional
+                        </label>
+                        <div class="mb-2">
+                            <img id="createProfessionalPhotoPreview" src="/img/default-user.svg" alt="Foto do Profissional" 
+                                 class="img-thumbnail rounded-circle" style="width: 150px; height: 150px; object-fit: cover; cursor: pointer;"
+                                 onclick="document.getElementById('createProfessionalPhotoInput').click()">
+                        </div>
+                        <input type="file" id="createProfessionalPhotoInput" accept="image/jpeg,image/png,image/gif,image/webp" 
+                               style="display: none;" onchange="handleProfessionalPhotoPreview('createProfessionalPhotoInput', 'createProfessionalPhotoPreview')">
+                        <button type="button" class="btn btn-sm btn-outline-primary" onclick="document.getElementById('createProfessionalPhotoInput').click()">
+                            <i class="bi bi-upload"></i> Escolher Foto
+                        </button>
+                        <button type="button" class="btn btn-sm btn-outline-danger" id="removeCreateProfessionalPhotoBtn" style="display: none;" onclick="removeProfessionalPhoto('createProfessionalPhotoInput', 'createProfessionalPhotoPreview')">
+                            <i class="bi bi-trash"></i> Remover
+                        </button>
+                    </div>
+                    
                     <div class="row">
                         <div class="col-md-6 mb-3">
                             <label class="form-label">
@@ -285,6 +306,27 @@
             <form id="editProfessionalForm" novalidate>
                 <input type="hidden" id="editProfessionalId" name="id">
                 <div class="modal-body">
+                    <!-- Foto do Profissional -->
+                    <div class="mb-4 text-center">
+                        <label class="form-label d-block">
+                            <i class="bi bi-camera me-1"></i>
+                            Foto do Profissional
+                        </label>
+                        <div class="mb-2">
+                            <img id="editProfessionalPhotoPreview" src="/img/default-user.svg" alt="Foto do Profissional" 
+                                 class="img-thumbnail rounded-circle" style="width: 150px; height: 150px; object-fit: cover; cursor: pointer;"
+                                 onclick="document.getElementById('editProfessionalPhotoInput').click()">
+                        </div>
+                        <input type="file" id="editProfessionalPhotoInput" accept="image/jpeg,image/png,image/gif,image/webp" 
+                               style="display: none;" onchange="handleProfessionalPhotoPreview('editProfessionalPhotoInput', 'editProfessionalPhotoPreview')">
+                        <button type="button" class="btn btn-sm btn-outline-primary" onclick="document.getElementById('editProfessionalPhotoInput').click()">
+                            <i class="bi bi-upload"></i> Escolher Foto
+                        </button>
+                        <button type="button" class="btn btn-sm btn-outline-danger" id="removeEditProfessionalPhotoBtn" style="display: none;" onclick="removeProfessionalPhoto('editProfessionalPhotoInput', 'editProfessionalPhotoPreview')">
+                            <i class="bi bi-trash"></i> Remover
+                        </button>
+                    </div>
+                    
                     <div class="row">
                         <div class="col-md-6 mb-3">
                             <label class="form-label">
@@ -661,6 +703,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 
                 showAlert('Profissional criado com sucesso!', 'success');
+                
+                // Upload de foto se houver
+                const photoInput = document.getElementById('createProfessionalPhotoInput');
+                if (photoInput && photoInput.files && photoInput.files.length > 0) {
+                    await uploadProfessionalPhoto(response.data.id, photoInput.files[0]);
+                }
+                
                 bootstrap.Modal.getInstance(document.getElementById('createProfessionalModal')).hide();
                 loadProfessionals();
             } catch (error) {
@@ -741,6 +790,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 
                 showAlert('Profissional atualizado com sucesso!', 'success');
+                
+                // Upload de foto se houver
+                const photoInput = document.getElementById('editProfessionalPhotoInput');
+                const editProfessionalId = document.getElementById('editProfessionalId').value;
+                if (photoInput && photoInput.files && photoInput.files.length > 0 && editProfessionalId) {
+                    await uploadProfessionalPhoto(parseInt(editProfessionalId), photoInput.files[0]);
+                }
+                
                 bootstrap.Modal.getInstance(document.getElementById('editProfessionalModal')).hide();
                 loadProfessionals();
             } catch (error) {
@@ -948,6 +1005,15 @@ async function editProfessional(id) {
         if (professional.professional_role_id) {
             document.getElementById('editProfessionalRoleId').value = professional.professional_role_id;
             handleRoleSelection(professional.professional_role_id, 'edit');
+        }
+        
+        // Atualiza foto do profissional
+        if (professional.photo_url) {
+            document.getElementById('editProfessionalPhotoPreview').src = '/' + professional.photo_url;
+            document.getElementById('removeEditProfessionalPhotoBtn').style.display = 'inline-block';
+        } else {
+            document.getElementById('editProfessionalPhotoPreview').src = '/img/default-user.svg';
+            document.getElementById('removeEditProfessionalPhotoBtn').style.display = 'none';
         }
         
         const modal = new bootstrap.Modal(document.getElementById('editProfessionalModal'));
@@ -1271,6 +1337,56 @@ function showConfirmModal(message, title, buttonText, buttonClass) {
             resolve(false);
         }, { once: true });
     });
+}
+
+// Funções para upload de foto de profissional
+function handleProfessionalPhotoPreview(inputId, previewId) {
+    const input = document.getElementById(inputId);
+    const preview = document.getElementById(previewId);
+    const removeBtn = inputId === 'createProfessionalPhotoInput' 
+        ? document.getElementById('removeCreateProfessionalPhotoBtn')
+        : document.getElementById('removeEditProfessionalPhotoBtn');
+    
+    if (input.files && input.files[0]) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            preview.src = e.target.result;
+            if (removeBtn) removeBtn.style.display = 'inline-block';
+        };
+        reader.readAsDataURL(input.files[0]);
+    }
+}
+
+function removeProfessionalPhoto(inputId, previewId) {
+    const input = document.getElementById(inputId);
+    const preview = document.getElementById(previewId);
+    const removeBtn = inputId === 'createProfessionalPhotoInput' 
+        ? document.getElementById('removeCreateProfessionalPhotoBtn')
+        : document.getElementById('removeEditProfessionalPhotoBtn');
+    
+    input.value = '';
+    preview.src = '/img/default-user.svg';
+    if (removeBtn) removeBtn.style.display = 'none';
+}
+
+async function uploadProfessionalPhoto(professionalId, file) {
+    try {
+        const formData = new FormData();
+        formData.append('photo', file);
+        
+        const response = await apiRequest(`/v1/files/professionals/${professionalId}/photo`, {
+            method: 'POST',
+            body: formData,
+            isFormData: true
+        });
+        
+        if (response && response.data) {
+            console.log('Foto do profissional enviada com sucesso');
+        }
+    } catch (error) {
+        console.error('Erro ao fazer upload da foto:', error);
+        showAlert('Erro ao fazer upload da foto: ' + (error.message || 'Erro desconhecido'), 'warning');
+    }
 }
 </script>
 

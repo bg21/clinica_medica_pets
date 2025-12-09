@@ -283,7 +283,7 @@ class ProfessionalController
                 }
             }
             
-            $professionalModel->updateProfessional((int)$id, $data);
+            $professionalModel->updateProfessional($tenantId, (int)$id, $data);
             $updatedProfessional = $professionalModel->findById((int)$id);
             
             ResponseHelper::sendSuccess($updatedProfessional, 'Profissional atualizado com sucesso');

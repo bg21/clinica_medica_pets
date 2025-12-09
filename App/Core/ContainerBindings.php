@@ -41,6 +41,8 @@ class ContainerBindings
         $container->bind(\App\Models\ProfessionalRole::class, \App\Models\ProfessionalRole::class, true);
         $container->bind(\App\Models\ProfessionalSchedule::class, \App\Models\ProfessionalSchedule::class, true);
         $container->bind(\App\Models\ScheduleBlock::class, \App\Models\ScheduleBlock::class, true);
+        $container->bind(\App\Models\Exam::class, \App\Models\Exam::class, true);
+        $container->bind(\App\Models\ExamType::class, \App\Models\ExamType::class, true);
         
         // ============================================
         // REPOSITORIES (singletons)
@@ -83,6 +85,17 @@ class ContainerBindings
             return new \App\Services\AppointmentService(
                 $container->make(\App\Services\StripeService::class),
                 $container->make(\App\Models\Appointment::class),
+                $container->make(\App\Models\Customer::class),
+                $container->make(\App\Models\Pet::class)
+            );
+        }, true);
+        
+        // Service de integração de exames com pagamentos
+        $container->bind(\App\Services\ExamService::class, function(Container $container) {
+            return new \App\Services\ExamService(
+                $container->make(\App\Services\StripeService::class),
+                $container->make(\App\Models\Exam::class),
+                $container->make(\App\Models\ExamType::class),
                 $container->make(\App\Models\Customer::class),
                 $container->make(\App\Models\Pet::class)
             );
@@ -272,6 +285,20 @@ class ContainerBindings
         $container->bind(\App\Controllers\ProfessionalScheduleController::class, \App\Controllers\ProfessionalScheduleController::class, false);
         $container->bind(\App\Controllers\ClinicController::class, \App\Controllers\ClinicController::class, false);
         $container->bind(\App\Controllers\ClinicReportController::class, \App\Controllers\ClinicReportController::class, false);
+        $container->bind(\App\Controllers\ClinicDashboardController::class, function(Container $container) {
+            return new \App\Controllers\ClinicDashboardController(
+                $container->make(\App\Models\Appointment::class),
+                $container->make(\App\Models\Pet::class),
+                $container->make(\App\Models\Customer::class),
+                $container->make(\App\Models\Professional::class)
+            );
+        }, false);
+        $container->bind(\App\Services\FileUploadService::class, \App\Services\FileUploadService::class, false);
+        $container->bind(\App\Controllers\FileController::class, function(Container $container) {
+            return new \App\Controllers\FileController(
+                $container->make(\App\Services\FileUploadService::class)
+            );
+        }, false);
         $container->bind(\App\Controllers\AppointmentController::class, function(Container $container) {
             return new \App\Controllers\AppointmentController(
                 $container->make(\App\Services\AppointmentService::class)
@@ -280,6 +307,14 @@ class ContainerBindings
         $container->bind(\App\Controllers\AppointmentPriceConfigController::class, function(Container $container) {
             return new \App\Controllers\AppointmentPriceConfigController(
                 $container->make(\App\Models\AppointmentPriceConfig::class),
+                $container->make(\App\Models\Professional::class)
+            );
+        }, false);
+        $container->bind(\App\Controllers\SearchController::class, function(Container $container) {
+            return new \App\Controllers\SearchController(
+                $container->make(\App\Models\Pet::class),
+                $container->make(\App\Models\Customer::class),
+                $container->make(\App\Models\Appointment::class),
                 $container->make(\App\Models\Professional::class)
             );
         }, false);
