@@ -80,7 +80,10 @@ class UserPermission extends BaseModel
                 'view_balance_transactions',
                 'view_charges', 'manage_charges',
                 'view_reports',
-                'view_payouts', 'manage_payouts'
+                'view_payouts', 'manage_payouts',
+                // Permissões de comissões
+                'view_commissions', 'update_commissions',
+                'view_commission_config', 'update_commission_config'
             ],
             'editor' => [
                 'view_subscriptions', 'create_subscriptions', 'update_subscriptions',
@@ -89,11 +92,16 @@ class UserPermission extends BaseModel
                 'view_disputes',
                 'view_balance_transactions',
                 'view_charges',
-                'view_reports'
+                'view_reports',
+                // Permissões de comissões
+                'view_commissions', 'update_commissions',
+                'view_commission_config', 'update_commission_config'
             ],
             'viewer' => [
                 'view_subscriptions', 'view_customers',
-                'view_charges'
+                'view_charges',
+                // Permissões de comissões (apenas visualização)
+                'view_commissions', 'view_commission_config'
             ]
         ];
     }

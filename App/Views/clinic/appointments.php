@@ -13,9 +13,14 @@
             </h1>
             <p class="text-muted mb-0">Gerencie os agendamentos da clínica</p>
         </div>
-        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createAppointmentModal">
-            <i class="bi bi-plus-circle"></i> Novo Agendamento
-        </button>
+        <div>
+            <button class="btn btn-outline-primary me-2" onclick="window.location.href='/clinic/exams'">
+                <i class="bi bi-clipboard-pulse"></i> Agendar Exame
+            </button>
+            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createAppointmentModal">
+                <i class="bi bi-calendar-plus"></i> Agendar Consulta
+            </button>
+        </div>
     </div>
 
     <div id="alertContainer"></div>

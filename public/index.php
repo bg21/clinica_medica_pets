@@ -319,7 +319,7 @@ $app->before('start', function() use ($app) {
         // Rotas de administração (verificam autenticação individualmente)
         '/traces', '/performance-metrics',
         // Rotas de Clínica Veterinária (verificam autenticação individualmente)
-        '/clinic/dashboard', '/clinic/pets', '/clinic/professionals', '/clinic/specialties', '/clinic/professional-schedule', '/clinic/appointments', '/clinic/exams', '/clinic/reports', '/clinic/search', '/schedule', '/clinic-settings'
+        '/clinic/dashboard', '/clinic/pets', '/clinic/professionals', '/clinic/specialties', '/clinic/professional-schedule', '/clinic/appointments', '/clinic/exams', '/clinic/budgets', '/clinic/commissions', '/clinic/reports', '/clinic/search', '/schedule', '/clinic-settings'
     ];
     $requestUri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
     
@@ -1316,6 +1316,42 @@ $app->route('GET /clinic/exams', function() use ($app) {
     ], true);
 });
 
+$app->route('GET /clinic/budgets', function() use ($app) {
+    [$user, $tenant, $sessionId] = getAuthenticatedUserData();
+    $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
+    \App\Utils\View::render('clinic/budgets', [
+        'apiUrl' => $apiUrl,
+        'user' => $user,
+        'tenant' => $tenant,
+        'title' => 'Orçamentos',
+        'currentPage' => 'clinic-budgets'
+    ], true);
+});
+
+$app->route('GET /clinic/commissions', function() use ($app) {
+    [$user, $tenant, $sessionId] = getAuthenticatedUserData();
+    $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
+    \App\Utils\View::render('clinic/commissions', [
+        'apiUrl' => $apiUrl,
+        'user' => $user,
+        'tenant' => $tenant,
+        'title' => 'Comissões',
+        'currentPage' => 'clinic-commissions'
+    ], true);
+});
+
 $app->route('GET /clinic/specialties', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
@@ -1766,7 +1802,6 @@ $app->route('GET /v1/clinic/appointments/@id/invoice', [$appointmentController, 
 
 // Rotas de Exames
 $examController = $container->make(\App\Controllers\ExamController::class);
-$examTypeController = $container->make(\App\Controllers\ExamTypeController::class);
 $app->route('POST /v1/clinic/exams', [$examController, 'create']);
 $app->route('GET /v1/clinic/exams', [$examController, 'list']);
 $app->route('GET /v1/clinic/exams/@id', [$examController, 'get']);
@@ -1777,9 +1812,34 @@ $app->route('GET /v1/clinic/exams/professional/@professional_id', [$examControll
 $app->route('POST /v1/clinic/exams/@id/pay', [$examController, 'pay']);
 $app->route('GET /v1/clinic/exams/@id/invoice', [$examController, 'getInvoice']);
 
-// Rotas de Tipos de Exame
-$app->route('GET /v1/clinic/exam-types', [$examTypeController, 'list']);
-$app->route('GET /v1/clinic/exam-types/@id', [$examTypeController, 'get']);
+// Rotas de Tipos de Exame (gerenciadas pelo ExamController)
+$app->route('GET /v1/clinic/exam-types', [$examController, 'listExamTypes']);
+$app->route('POST /v1/clinic/exam-types', [$examController, 'createExamType']);
+$app->route('PUT /v1/clinic/exam-types/@id', [$examController, 'updateExamType']);
+$app->route('DELETE /v1/clinic/exam-types/@id', [$examController, 'deleteExamType']);
+$app->route('GET /v1/clinic/exam-types/@id', [$examController, 'getExamType']);
+$app->route('GET /v1/clinic/exam-types/@id/count', [$examController, 'countExamsByType']);
+
+// Rotas de Orçamentos
+$budgetController = $container->make(\App\Controllers\BudgetController::class);
+$app->route('POST /v1/clinic/budgets', [$budgetController, 'create']);
+$app->route('GET /v1/clinic/budgets', [$budgetController, 'list']);
+$app->route('GET /v1/clinic/budgets/@id', [$budgetController, 'get']);
+$app->route('PUT /v1/clinic/budgets/@id', [$budgetController, 'update']);
+$app->route('DELETE /v1/clinic/budgets/@id', [$budgetController, 'delete']);
+$app->route('POST /v1/clinic/budgets/@id/convert', [$budgetController, 'convert']);
+
+// Rotas de Comissões (rotas específicas ANTES das rotas com parâmetros)
+$commissionController = $container->make(\App\Controllers\CommissionController::class);
+$app->route('GET /v1/clinic/commissions', [$commissionController, 'list']);
+// Rotas específicas primeiro (antes de @id)
+$app->route('GET /v1/clinic/commissions/config', [$commissionController, 'getConfig']);
+$app->route('PUT /v1/clinic/commissions/config', [$commissionController, 'updateConfig']);
+$app->route('GET /v1/clinic/commissions/stats', [$commissionController, 'getGeneralStats']);
+$app->route('GET /v1/clinic/commissions/stats/user/@user_id', [$commissionController, 'getUserStats']);
+// Rotas com parâmetros por último
+$app->route('GET /v1/clinic/commissions/@id', [$commissionController, 'get']);
+$app->route('POST /v1/clinic/commissions/@id/mark-paid', [$commissionController, 'markPaid']);
 
 $professionalScheduleController = $container->make(\App\Controllers\ProfessionalScheduleController::class);
 $app->route('GET /v1/clinic/professionals/@id/schedule', [$professionalScheduleController, 'getSchedule']);

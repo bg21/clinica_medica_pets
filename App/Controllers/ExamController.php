@@ -10,6 +10,7 @@ use App\Models\Professional;
 use App\Services\ExamService;
 use App\Utils\PermissionHelper;
 use App\Utils\ResponseHelper;
+use App\Utils\Validator;
 use Flight;
 
 /**
@@ -155,8 +156,51 @@ class ExamController
             $examModel = new Exam();
             $result = $examModel->findByTenant($tenantId, $page, $limit, $filters);
 
+            // Carrega relacionamentos para cada exame
+            $exams = [];
+            $petModel = new Pet();
+            $customerModel = new Customer();
+            $examTypeModel = new ExamType();
+            $professionalModel = new Professional();
+            
+            foreach ($result['data'] as $exam) {
+                // Carrega pet
+                if (!empty($exam['pet_id'])) {
+                    $pet = $petModel->findByTenantAndId($tenantId, (int)$exam['pet_id']);
+                    if ($pet) {
+                        $exam['pet'] = $pet;
+                    }
+                }
+                
+                // Carrega client/customer
+                if (!empty($exam['client_id'])) {
+                    $client = $customerModel->findByTenantAndId($tenantId, (int)$exam['client_id']);
+                    if ($client) {
+                        $exam['client'] = $client;
+                    }
+                }
+                
+                // Carrega exam_type
+                if (!empty($exam['exam_type_id'])) {
+                    $examType = $examTypeModel->findByTenantAndId($tenantId, (int)$exam['exam_type_id']);
+                    if ($examType) {
+                        $exam['exam_type'] = $examType;
+                    }
+                }
+                
+                // Carrega professional
+                if (!empty($exam['professional_id'])) {
+                    $professional = $professionalModel->findByTenantAndId($tenantId, (int)$exam['professional_id']);
+                    if ($professional) {
+                        $exam['professional'] = $professional;
+                    }
+                }
+                
+                $exams[] = $exam;
+            }
+
             $responseData = [
-                'exams' => $result['data'],
+                'data' => $exams,
                 'meta' => [
                     'total' => $result['total'],
                     'page' => $result['page'],
@@ -165,7 +209,7 @@ class ExamController
                 ]
             ];
             
-            ResponseHelper::sendSuccess($responseData['exams'], 200, null, $responseData['meta']);
+            ResponseHelper::sendSuccess($responseData['data'], 200, null, $responseData['meta']);
         } catch (\Exception $e) {
             ResponseHelper::sendGenericError(
                 $e,
@@ -466,18 +510,16 @@ class ExamController
             );
         }
     }
-}
 
-/**
- * Controller para gerenciar tipos de exames
- */
-class ExamTypeController
-{
+    // =====================================================================
+    // TIPOS DE EXAMES (CRUD)
+    // =====================================================================
+
     /**
      * Lista tipos de exame ativos do tenant
      * GET /v1/clinic/exam-types
      */
-    public function list(): void
+    public function listExamTypes(): void
     {
         try {
             PermissionHelper::require('view_exams');
@@ -507,7 +549,7 @@ class ExamTypeController
      * Obtém tipo de exame por ID
      * GET /v1/clinic/exam-types/:id
      */
-    public function get(string $id): void
+    public function getExamType(string $id): void
     {
         try {
             PermissionHelper::require('view_exams');
@@ -535,6 +577,141 @@ class ExamTypeController
                 'EXAM_TYPE_GET_ERROR',
                 ['action' => 'get_exam_type', 'exam_type_id' => $id, 'tenant_id' => $tenantId ?? null]
             );
+        }
+    }
+
+    /**
+     * Cria um novo tipo de exame
+     * POST /v1/clinic/exam-types
+     */
+    public function createExamType(): void
+    {
+        try {
+            PermissionHelper::require('create_exam_types');
+            
+            $tenantId = Flight::get('tenant_id');
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_exam_type']);
+                return;
+            }
+            
+            $data = \App\Utils\RequestCache::getJsonInput();
+            if ($data === null && json_last_error() !== JSON_ERROR_NONE) {
+                ResponseHelper::sendInvalidJsonError(['action' => 'create_exam_type']);
+                return;
+            }
+            
+            $errors = Validator::validateExamTypeCreate($data);
+            if (!empty($errors)) {
+                ResponseHelper::sendValidationError('Dados inválidos', $errors, ['action' => 'create_exam_type']);
+                return;
+            }
+            
+            $examTypeModel = new ExamType();
+            $examTypeId = $examTypeModel->create($tenantId, $data);
+            $examType = $examTypeModel->findById($examTypeId);
+            
+            ResponseHelper::sendCreated($examType, 'Tipo de exame criado com sucesso');
+        } catch (\RuntimeException $e) {
+            ResponseHelper::sendGenericError($e, $e->getMessage(), 'EXAM_TYPE_CREATE_ERROR', ['action' => 'create_exam_type', 'tenant_id' => $tenantId ?? null]);
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError($e, 'Erro ao criar tipo de exame', 'EXAM_TYPE_CREATE_ERROR', ['action' => 'create_exam_type', 'tenant_id' => $tenantId ?? null]);
+        }
+    }
+
+    /**
+     * Atualiza um tipo de exame
+     * PUT /v1/clinic/exam-types/:id
+     */
+    public function updateExamType(string $id): void
+    {
+        try {
+            PermissionHelper::require('update_exam_types');
+            
+            $tenantId = Flight::get('tenant_id');
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'update_exam_type', 'exam_type_id' => $id]);
+                return;
+            }
+            
+            $data = \App\Utils\RequestCache::getJsonInput();
+            if ($data === null && json_last_error() !== JSON_ERROR_NONE) {
+                ResponseHelper::sendInvalidJsonError(['action' => 'update_exam_type', 'exam_type_id' => $id]);
+                return;
+            }
+            
+            $errors = Validator::validateExamTypeUpdate($data);
+            if (!empty($errors)) {
+                ResponseHelper::sendValidationError('Dados inválidos', $errors, ['action' => 'update_exam_type']);
+                return;
+            }
+            
+            $examTypeModel = new ExamType();
+            $examTypeModel->updateExamType($tenantId, (int)$id, $data);
+            $examType = $examTypeModel->findByTenantAndId($tenantId, (int)$id);
+            
+            ResponseHelper::sendSuccess($examType, 'Tipo de exame atualizado com sucesso');
+        } catch (\RuntimeException $e) {
+            ResponseHelper::sendGenericError($e, $e->getMessage(), 'EXAM_TYPE_UPDATE_ERROR', ['action' => 'update_exam_type', 'exam_type_id' => $id, 'tenant_id' => $tenantId ?? null]);
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError($e, 'Erro ao atualizar tipo de exame', 'EXAM_TYPE_UPDATE_ERROR', ['action' => 'update_exam_type', 'exam_type_id' => $id, 'tenant_id' => $tenantId ?? null]);
+        }
+    }
+
+    /**
+     * Deleta um tipo de exame (soft delete)
+     * DELETE /v1/clinic/exam-types/:id
+     */
+    public function deleteExamType(string $id): void
+    {
+        try {
+            PermissionHelper::require('delete_exam_types');
+            
+            $tenantId = Flight::get('tenant_id');
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'delete_exam_type', 'exam_type_id' => $id]);
+                return;
+            }
+            
+            $examTypeModel = new ExamType();
+            $examTypeModel->deleteExamType($tenantId, (int)$id);
+            
+            ResponseHelper::sendSuccess(null, 'Tipo de exame deletado com sucesso');
+        } catch (\RuntimeException $e) {
+            ResponseHelper::sendGenericError($e, $e->getMessage(), 'EXAM_TYPE_DELETE_ERROR', ['action' => 'delete_exam_type', 'exam_type_id' => $id, 'tenant_id' => $tenantId ?? null]);
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError($e, 'Erro ao deletar tipo de exame', 'EXAM_TYPE_DELETE_ERROR', ['action' => 'delete_exam_type', 'exam_type_id' => $id, 'tenant_id' => $tenantId ?? null]);
+        }
+    }
+
+    /**
+     * Conta exames agendados por tipo de exame
+     * GET /v1/clinic/exam-types/:id/count
+     */
+    public function countExamsByType(string $id): void
+    {
+        try {
+            PermissionHelper::require('view_exams');
+
+            $tenantId = Flight::get('tenant_id');
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'count_exams_by_type', 'exam_type_id' => $id]);
+                return;
+            }
+
+            $queryParams = Flight::request()->query;
+            $status = $queryParams['status'] ?? 'scheduled';
+
+            $examModel = new Exam();
+            $count = $examModel->countByExamType($tenantId, (int)$id, $status);
+
+            ResponseHelper::sendSuccess([
+                'exam_type_id' => (int)$id,
+                'status' => $status,
+                'count' => $count
+            ]);
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError($e, 'Erro ao contar exames por tipo', 'EXAM_TYPE_COUNT_ERROR', ['action' => 'count_exams_by_type', 'exam_type_id' => $id, 'tenant_id' => $tenantId ?? null]);
         }
     }
 }

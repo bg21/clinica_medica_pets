@@ -43,6 +43,9 @@ class ContainerBindings
         $container->bind(\App\Models\ScheduleBlock::class, \App\Models\ScheduleBlock::class, true);
         $container->bind(\App\Models\Exam::class, \App\Models\Exam::class, true);
         $container->bind(\App\Models\ExamType::class, \App\Models\ExamType::class, true);
+        $container->bind(\App\Models\Budget::class, \App\Models\Budget::class, true);
+        $container->bind(\App\Models\CommissionConfig::class, \App\Models\CommissionConfig::class, true);
+        $container->bind(\App\Models\Commission::class, \App\Models\Commission::class, true);
         
         // ============================================
         // REPOSITORIES (singletons)
@@ -98,6 +101,24 @@ class ContainerBindings
                 $container->make(\App\Models\ExamType::class),
                 $container->make(\App\Models\Customer::class),
                 $container->make(\App\Models\Pet::class)
+            );
+        }, true);
+        
+        // Service de orçamentos e comissões
+        $container->bind(\App\Services\BudgetService::class, function(Container $container) {
+            return new \App\Services\BudgetService(
+                $container->make(\App\Models\Budget::class),
+                $container->make(\App\Models\CommissionConfig::class),
+                $container->make(\App\Models\Commission::class),
+                $container->make(\App\Models\User::class)
+            );
+        }, true);
+        
+        // Service de comissões
+        $container->bind(\App\Services\CommissionService::class, function(Container $container) {
+            return new \App\Services\CommissionService(
+                $container->make(\App\Models\Commission::class),
+                $container->make(\App\Models\CommissionConfig::class)
             );
         }, true);
         
@@ -316,6 +337,27 @@ class ContainerBindings
                 $container->make(\App\Models\Customer::class),
                 $container->make(\App\Models\Appointment::class),
                 $container->make(\App\Models\Professional::class)
+            );
+        }, false);
+        
+        // Controller de Exames
+        $container->bind(\App\Controllers\ExamController::class, function(Container $container) {
+            return new \App\Controllers\ExamController(
+                $container->make(\App\Services\ExamService::class)
+            );
+        }, false);
+        
+        // Controller de Orçamentos
+        $container->bind(\App\Controllers\BudgetController::class, function(Container $container) {
+            return new \App\Controllers\BudgetController(
+                $container->make(\App\Services\BudgetService::class)
+            );
+        }, false);
+        
+        // Controller de Comissões
+        $container->bind(\App\Controllers\CommissionController::class, function(Container $container) {
+            return new \App\Controllers\CommissionController(
+                $container->make(\App\Services\CommissionService::class)
             );
         }, false);
         

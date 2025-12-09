@@ -308,6 +308,18 @@ $showSaaSFeatures = ($user['role'] ?? '') === 'admin';
                             </a>
                         </li>
                         <li class="nav-item">
+                            <a href="/clinic/budgets" class="nav-link <?php echo ($currentPage ?? '') === 'clinic-budgets' ? 'active' : ''; ?>">
+                                <i class="bi bi-file-earmark-text"></i>
+                                <span>Orçamentos</span>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a href="/clinic/commissions" class="nav-link <?php echo ($currentPage ?? '') === 'clinic-commissions' ? 'active' : ''; ?>">
+                                <i class="bi bi-cash-coin"></i>
+                                <span>Comissões</span>
+                            </a>
+                        </li>
+                        <li class="nav-item">
                             <a href="/clinic/reports" class="nav-link <?php echo ($currentPage ?? '') === 'clinic-reports' ? 'active' : ''; ?>">
                                 <i class="bi bi-graph-up"></i>
                                 <span>Relatórios</span>

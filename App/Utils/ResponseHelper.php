@@ -206,7 +206,7 @@ class ResponseHelper
      * @param int $statusCode Código HTTP (200, 201, etc.)
      * @param string|null $message Mensagem opcional
      */
-    public static function sendSuccess($data, int $statusCode = 200, ?string $message = null): void
+    public static function sendSuccess($data, int $statusCode = 200, ?string $message = null, ?array $meta = null): void
     {
         $response = [
             'success' => true
@@ -218,6 +218,10 @@ class ResponseHelper
         
         if ($data !== null) {
             $response['data'] = $data;
+        }
+        
+        if ($meta !== null) {
+            $response['meta'] = $meta;
         }
         
         Flight::json($response, $statusCode);

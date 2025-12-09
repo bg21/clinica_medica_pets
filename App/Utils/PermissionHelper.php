@@ -128,19 +128,42 @@ class PermissionHelper
      */
     public static function check(string $permission): bool
     {
-        // Se não é autenticação de usuário, sempre retorna true
-        if (!self::shouldCheckPermissions()) {
-            Logger::debug("Permissões não verificadas (API Key ou Master Key)", [
-                'permission' => $permission,
-                'is_user_auth' => Flight::get('is_user_auth'),
-                'is_master' => Flight::get('is_master')
-            ]);
-            return true;
-        }
+        try {
+            // Se não é autenticação de usuário, sempre retorna true
+            if (!self::shouldCheckPermissions()) {
+                Logger::debug("Permissões não verificadas (API Key ou Master Key)", [
+                    'permission' => $permission,
+                    'is_user_auth' => Flight::get('is_user_auth'),
+                    'is_master' => Flight::get('is_master')
+                ]);
+                return true;
+            }
 
-        // Verifica permissão usando o middleware
-        $middleware = new PermissionMiddleware();
-        return $middleware->check($permission);
+            // Verifica se é admin (admins têm todas as permissões)
+            $userRole = Flight::get('user_role');
+            if ($userRole === 'admin') {
+                Logger::debug("Permissão concedida automaticamente para admin", [
+                    'permission' => $permission,
+                    'user_role' => $userRole
+                ]);
+                return true;
+            }
+
+            // Verifica permissão usando o middleware
+            $middleware = new PermissionMiddleware();
+            return $middleware->check($permission);
+        } catch (\Throwable $e) {
+            // Em caso de erro, loga e retorna false (bloqueia por segurança)
+            Logger::error("Erro ao verificar permissão no PermissionHelper::check", [
+                'permission' => $permission,
+                'user_id' => Flight::get('user_id'),
+                'user_role' => Flight::get('user_role'),
+                'error' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine()
+            ]);
+            return false;
+        }
     }
 
     /**

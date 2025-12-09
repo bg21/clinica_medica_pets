@@ -5,6 +5,7 @@
 
 ---
 
+
 ## 📋 CONCEITO
 
 ### Modelo de Negócio

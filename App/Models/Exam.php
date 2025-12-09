@@ -232,6 +232,19 @@ class Exam extends BaseModel
             }
         }
         
+        // ✅ Validação: verifica se responsible_employee existe (se fornecido)
+        if (!empty($data['responsible_employee_id'])) {
+            $professionalModel = new Professional();
+            $responsibleEmployee = $professionalModel->findByTenantAndId($tenantId, (int)$data['responsible_employee_id']);
+            if (!$responsibleEmployee) {
+                throw new \RuntimeException("Funcionário responsável com ID {$data['responsible_employee_id']} não encontrado ou não pertence ao tenant {$tenantId}");
+            }
+            
+            if ($responsibleEmployee['status'] !== 'active') {
+                throw new \RuntimeException("Funcionário responsável não está ativo");
+            }
+        }
+        
         // ✅ Validação: verifica se exam_type existe (se fornecido)
         if (!empty($data['exam_type_id'])) {
             $examTypeModel = new ExamType();
@@ -250,6 +263,7 @@ class Exam extends BaseModel
             'pet_id' => (int)$data['pet_id'],
             'client_id' => (int)$data['client_id'],
             'professional_id' => !empty($data['professional_id']) ? (int)$data['professional_id'] : null,
+            'responsible_employee_id' => !empty($data['responsible_employee_id']) ? (int)$data['responsible_employee_id'] : null,
             'exam_type_id' => !empty($data['exam_type_id']) ? (int)$data['exam_type_id'] : null,
             'exam_date' => $data['exam_date'],
             'exam_time' => $data['exam_time'] ?? null,
@@ -298,6 +312,17 @@ class Exam extends BaseModel
             }
         }
         
+        // ✅ Validação: verifica se responsible_employee existe (se alterado)
+        if (isset($data['responsible_employee_id']) && $data['responsible_employee_id'] != ($exam['responsible_employee_id'] ?? null)) {
+            if (!empty($data['responsible_employee_id'])) {
+                $professionalModel = new Professional();
+                $responsibleEmployee = $professionalModel->findByTenantAndId($tenantId, (int)$data['responsible_employee_id']);
+                if (!$responsibleEmployee) {
+                    throw new \RuntimeException("Funcionário responsável com ID {$data['responsible_employee_id']} não encontrado ou não pertence ao tenant {$tenantId}");
+                }
+            }
+        }
+        
         // ✅ Validação: verifica se exam_type existe (se alterado)
         if (isset($data['exam_type_id']) && $data['exam_type_id'] != $exam['exam_type_id']) {
             if (!empty($data['exam_type_id'])) {
@@ -328,7 +353,7 @@ class Exam extends BaseModel
         
         $updateData = [];
         $allowedFields = [
-            'pet_id', 'client_id', 'professional_id', 'exam_type_id',
+            'pet_id', 'client_id', 'professional_id', 'responsible_employee_id', 'exam_type_id',
             'exam_date', 'exam_time', 'status', 'notes', 'results',
             'cancellation_reason', 'cancelled_by', 'cancelled_at', 'completed_at',
             'stripe_invoice_id', 'metadata'
@@ -336,7 +361,7 @@ class Exam extends BaseModel
         
         foreach ($allowedFields as $field) {
             if (isset($data[$field])) {
-                if (in_array($field, ['pet_id', 'client_id', 'professional_id', 'exam_type_id', 'cancelled_by'])) {
+                if (in_array($field, ['pet_id', 'client_id', 'professional_id', 'responsible_employee_id', 'exam_type_id', 'cancelled_by'])) {
                     $updateData[$field] = !empty($data[$field]) ? (int)$data[$field] : null;
                 } elseif ($field === 'metadata' && is_array($data[$field])) {
                     $updateData[$field] = json_encode($data[$field]);
@@ -351,6 +376,40 @@ class Exam extends BaseModel
         }
         
         return $this->update($id, $updateData);
+    }
+
+    /**
+     * Conta exames agendados por tipo de exame
+     * 
+     * @param int $tenantId ID do tenant
+     * @param int $examTypeId ID do tipo de exame
+     * @param string|null $status Status do exame (opcional, padrão: 'scheduled')
+     * @return int Número de exames
+     */
+    public function countByExamType(int $tenantId, int $examTypeId, ?string $status = 'scheduled'): int
+    {
+        $conditions = [
+            'tenant_id' => $tenantId,
+            'exam_type_id' => $examTypeId
+        ];
+        
+        if ($status !== null) {
+            $conditions['status'] = $status;
+        }
+        
+        return $this->count($conditions);
+    }
+
+    /**
+     * Conta exames agendados por tipo de exame (todos os status)
+     * 
+     * @param int $tenantId ID do tenant
+     * @param int $examTypeId ID do tipo de exame
+     * @return int Número de exames
+     */
+    public function countAllByExamType(int $tenantId, int $examTypeId): int
+    {
+        return $this->countByExamType($tenantId, $examTypeId, null);
     }
 }
 

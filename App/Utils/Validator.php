@@ -1457,5 +1457,127 @@ class Validator
         
         return $errors;
     }
+
+    /**
+     * Valida dados para criação de tipo de exame
+     * 
+     * @param array $data Dados a validar
+     * @return array Array de erros (vazio se válido)
+     */
+    public static function validateExamTypeCreate(array $data): array
+    {
+        $errors = [];
+        
+        // name: obrigatório, string, máximo 255 caracteres
+        if (!isset($data['name']) || empty(trim($data['name']))) {
+            $errors['name'] = 'Obrigatório';
+        } elseif (!is_string($data['name'])) {
+            $errors['name'] = 'Deve ser uma string';
+        } elseif (strlen($data['name']) > 255) {
+            $errors['name'] = 'Muito longo (máximo 255 caracteres)';
+        }
+        
+        // category: obrigatório, deve ser uma das categorias válidas
+        $validCategories = ['blood', 'urine', 'imaging', 'other'];
+        if (!isset($data['category'])) {
+            $errors['category'] = 'Obrigatório';
+        } elseif (!in_array($data['category'], $validCategories, true)) {
+            $errors['category'] = 'Deve ser uma das categorias válidas: ' . implode(', ', $validCategories);
+        }
+        
+        // description: opcional, string, máximo 5000 caracteres
+        if (isset($data['description']) && !is_string($data['description'])) {
+            $errors['description'] = 'Deve ser uma string';
+        } elseif (isset($data['description']) && strlen($data['description']) > 5000) {
+            $errors['description'] = 'Muito longo (máximo 5000 caracteres)';
+        }
+        
+        // notes: opcional, string, máximo 5000 caracteres
+        if (isset($data['notes']) && !is_string($data['notes'])) {
+            $errors['notes'] = 'Deve ser uma string';
+        } elseif (isset($data['notes']) && strlen($data['notes']) > 5000) {
+            $errors['notes'] = 'Muito longo (máximo 5000 caracteres)';
+        }
+        
+        // price_id: opcional, deve seguir formato Stripe (price_xxxxx)
+        if (isset($data['price_id']) && !empty($data['price_id'])) {
+            $priceIdErrors = self::validateStripeId($data['price_id'], 'price_id');
+            if (!empty($priceIdErrors)) {
+                $errors = array_merge($errors, $priceIdErrors);
+            }
+        }
+        
+        // status: opcional, deve ser 'active' ou 'inactive'
+        if (isset($data['status'])) {
+            $validStatuses = ['active', 'inactive'];
+            if (!in_array($data['status'], $validStatuses, true)) {
+                $errors['status'] = 'Deve ser "active" ou "inactive"';
+            }
+        }
+        
+        return $errors;
+    }
+
+    /**
+     * Valida dados para atualização de tipo de exame
+     * 
+     * @param array $data Dados a validar
+     * @return array Array de erros (vazio se válido)
+     */
+    public static function validateExamTypeUpdate(array $data): array
+    {
+        $errors = [];
+        
+        // name: opcional na atualização, mas se presente deve ser válido
+        if (isset($data['name'])) {
+            if (empty(trim($data['name']))) {
+                $errors['name'] = 'Não pode ser vazio';
+            } elseif (!is_string($data['name'])) {
+                $errors['name'] = 'Deve ser uma string';
+            } elseif (strlen($data['name']) > 255) {
+                $errors['name'] = 'Muito longo (máximo 255 caracteres)';
+            }
+        }
+        
+        // category: opcional na atualização, mas se presente deve ser válido
+        if (isset($data['category'])) {
+            $validCategories = ['blood', 'urine', 'imaging', 'other'];
+            if (!in_array($data['category'], $validCategories, true)) {
+                $errors['category'] = 'Deve ser uma das categorias válidas: ' . implode(', ', $validCategories);
+            }
+        }
+        
+        // description: opcional, string, máximo 5000 caracteres
+        if (isset($data['description']) && !is_string($data['description'])) {
+            $errors['description'] = 'Deve ser uma string';
+        } elseif (isset($data['description']) && strlen($data['description']) > 5000) {
+            $errors['description'] = 'Muito longo (máximo 5000 caracteres)';
+        }
+        
+        // notes: opcional, string, máximo 5000 caracteres
+        if (isset($data['notes']) && !is_string($data['notes'])) {
+            $errors['notes'] = 'Deve ser uma string';
+        } elseif (isset($data['notes']) && strlen($data['notes']) > 5000) {
+            $errors['notes'] = 'Muito longo (máximo 5000 caracteres)';
+        }
+        
+        // price_id: opcional, deve seguir formato Stripe (price_xxxxx)
+        if (isset($data['price_id']) && !empty($data['price_id'])) {
+            $priceIdErrors = self::validateStripeId($data['price_id'], 'price_id');
+            if (!empty($priceIdErrors)) {
+                $errors = array_merge($errors, $priceIdErrors);
+            }
+        }
+        
+        // status: opcional, deve ser 'active' ou 'inactive'
+        if (isset($data['status'])) {
+            $validStatuses = ['active', 'inactive'];
+            if (!in_array($data['status'], $validStatuses, true)) {
+                $errors['status'] = 'Deve ser "active" ou "inactive"';
+            }
+        }
+        
+        return $errors;
+    }
 }
 
