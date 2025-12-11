@@ -46,19 +46,48 @@ document.addEventListener('DOMContentLoaded', () => {
         sidebar.classList.remove('show');
     }
     
-    // Remove session_id da URL se estiver presente (segurança)
+    // ✅ CORREÇÃO: Lê SESSION_ID dinamicamente do localStorage
+    // Verifica se é administrador SaaS primeiro, depois usuário normal
+    let sessionId = localStorage.getItem('saas_admin_session_id') || localStorage.getItem('session_id') || (typeof SESSION_ID !== 'undefined' ? SESSION_ID : null);
+    
+    // Fallback: tenta obter da query string (para desenvolvimento) e salva no localStorage
     const urlParams = new URLSearchParams(window.location.search);
+    if (!sessionId) {
+        const saasAdminSessionId = urlParams.get('saas_admin_session_id');
+        const normalSessionId = urlParams.get('session_id');
+        
+        if (saasAdminSessionId) {
+            sessionId = saasAdminSessionId;
+            localStorage.setItem('saas_admin_session_id', saasAdminSessionId);
+        } else if (normalSessionId) {
+            sessionId = normalSessionId;
+            localStorage.setItem('session_id', normalSessionId);
+        }
+    }
+    
+    // Remove session_id da URL se estiver presente (segurança)
+    let urlChanged = false;
     if (urlParams.has('session_id')) {
         urlParams.delete('session_id');
+        urlChanged = true;
+    }
+    if (urlParams.has('saas_admin_session_id')) {
+        urlParams.delete('saas_admin_session_id');
+        urlChanged = true;
+    }
+    if (urlChanged) {
         const newUrl = window.location.pathname + (urlParams.toString() ? '?' + urlParams.toString() : '');
         window.history.replaceState({}, '', newUrl);
     }
     
-    // Verifica se tem session_id
-    if (!SESSION_ID) {
+    if (!sessionId) {
         // Redireciona apenas se não tiver session_id
+        // Se estiver em /admin-plans, redireciona para login de administrador SaaS
+        const currentPath = window.location.pathname;
+        const redirectUrl = currentPath.includes('/admin-plans') ? '/saas-admin/login' : '/login';
+        
         setTimeout(() => {
-            window.location.href = '/login';
+            window.location.href = redirectUrl;
         }, 100);
         return;
     }
@@ -68,9 +97,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 segundos timeout (aumentado)
     
+    // Para administradores SaaS, não precisa verificar /v1/auth/me (não existe endpoint para isso)
+    const isSaasAdmin = localStorage.getItem('saas_admin_session_id') !== null || (sessionId && urlParams.get('saas_admin_session_id'));
+    
+    if (isSaasAdmin) {
+        // Administradores SaaS não precisam verificar sessão via /v1/auth/me
+        clearTimeout(timeoutId);
+        return;
+    }
+    
     fetch(API_URL + '/v1/auth/me', {
         headers: {
-            'Authorization': 'Bearer ' + SESSION_ID,
+            'Authorization': 'Bearer ' + sessionId,
             'Content-Type': 'application/json'
         },
         signal: controller.signal
@@ -126,10 +164,22 @@ document.addEventListener('DOMContentLoaded', () => {
             error.message.includes('401')
         )) {
             console.warn('Sessão inválida, redirecionando...');
+            
+            // Verifica se é administrador SaaS antes de redirecionar
+            const isSaasAdmin = localStorage.getItem('saas_admin_session_id') !== null;
+            
+            // Limpa dados de sessão
             localStorage.removeItem('session_id');
+            localStorage.removeItem('saas_admin_session_id');
             localStorage.removeItem('user');
             localStorage.removeItem('tenant');
-            window.location.href = '/login';
+            
+            // Redireciona para o login apropriado
+            if (isSaasAdmin) {
+                window.location.href = '/saas-admin/login';
+            } else {
+                window.location.href = '/login';
+            }
         } else {
             // Para outros erros, apenas loga mas não redireciona
             console.warn('Erro ao verificar sessão (não crítico):', error.message || error);
@@ -146,17 +196,27 @@ document.addEventListener('DOMContentLoaded', () => {
 async function logout() {
     const confirmed = await showConfirmModal('Deseja realmente sair?', 'Confirmar Logout', 'Sair', 'btn-primary');
     if (confirmed) {
-        fetch(API_URL + '/v1/auth/logout', {
-            method: 'POST',
-            headers: {
-                'Authorization': 'Bearer ' + SESSION_ID
-            }
-        }).finally(() => {
+        const sessionId = localStorage.getItem('session_id') || (typeof SESSION_ID !== 'undefined' ? SESSION_ID : null);
+        
+        if (sessionId) {
+            fetch(API_URL + '/v1/auth/logout', {
+                method: 'POST',
+                headers: {
+                    'Authorization': 'Bearer ' + sessionId
+                }
+            }).finally(() => {
+                localStorage.removeItem('session_id');
+                localStorage.removeItem('user');
+                localStorage.removeItem('tenant');
+                window.location.href = '/login';
+            });
+        } else {
+            // Se não tem session, apenas limpa e redireciona
             localStorage.removeItem('session_id');
             localStorage.removeItem('user');
             localStorage.removeItem('tenant');
             window.location.href = '/login';
-        });
+        }
     }
 }
 
@@ -192,7 +252,9 @@ window.addEventListener('resize', () => {
 });
 
 // ✅ OTIMIZAÇÃO: Cache simples no frontend (localStorage) com melhor performance
-const cache = {
+// Protege contra redeclaração (caso o script seja carregado múltiplas vezes)
+if (typeof window.cache === 'undefined') {
+    window.cache = {
     get: (key) => {
         try {
             const item = localStorage.getItem('api_cache_' + key);
@@ -248,9 +310,10 @@ const cache = {
             } catch (e) {
                 // Ignora se não suportado
             }
-        } catch (e) {}
+        } catch (e) {        }
     }
 };
+} // Fecha if (typeof window.cache === 'undefined')
 
 // ✅ OTIMIZAÇÃO: Helper para fazer requisições autenticadas com cache e retry
 async function apiRequest(endpoint, options = {}) {
@@ -260,7 +323,7 @@ async function apiRequest(endpoint, options = {}) {
     
     // Tenta obter do cache primeiro (apenas para GET)
     if (useCache && !options.skipCache) {
-        const cached = cache.get(cacheKey);
+        const cached = window.cache.get(cacheKey);
         if (cached !== null) {
             return cached;
         }
@@ -269,9 +332,23 @@ async function apiRequest(endpoint, options = {}) {
     // Detecta se é FormData
     const isFormData = options.isFormData || (options.body instanceof FormData);
     
+    // ✅ CORREÇÃO: Lê SESSION_ID dinamicamente do localStorage (fallback para constante)
+    // Verifica se é administrador SaaS primeiro, depois usuário normal
+    let sessionId = localStorage.getItem('saas_admin_session_id') || localStorage.getItem('session_id') || (typeof SESSION_ID !== 'undefined' ? SESSION_ID : null);
+    
+    // Fallback: tenta obter da query string (para desenvolvimento)
+    if (!sessionId) {
+        const urlParams = new URLSearchParams(window.location.search);
+        sessionId = urlParams.get('saas_admin_session_id') || urlParams.get('session_id');
+    }
+    
+    if (!sessionId) {
+        throw new Error('Sessão não encontrada. Por favor, faça login novamente.');
+    }
+    
     const defaultOptions = {
         headers: {
-            'Authorization': 'Bearer ' + SESSION_ID
+            'Authorization': 'Bearer ' + sessionId
         }
     };
     
@@ -313,7 +390,7 @@ async function apiRequest(endpoint, options = {}) {
             
             // Salva no cache (apenas para GET bem-sucedido)
             if (useCache && response.ok) {
-                cache.set(cacheKey, data, cacheTTL);
+                window.cache.set(cacheKey, data, cacheTTL);
             }
             
             return data;
@@ -368,36 +445,44 @@ function showAlert(message, type = 'info', containerId = 'alertContainer') {
 }
 
 // ✅ OTIMIZAÇÃO: Helper para formatar moeda (cache de formatter)
-const currencyFormatters = {};
+// Protege contra redeclaração
+if (typeof window.currencyFormatters === 'undefined') {
+    window.currencyFormatters = {};
+}
 function formatCurrency(value, currency = 'BRL') {
-    if (!currencyFormatters[currency]) {
-        currencyFormatters[currency] = new Intl.NumberFormat('pt-BR', {
+    if (!window.currencyFormatters[currency]) {
+        window.currencyFormatters[currency] = new Intl.NumberFormat('pt-BR', {
             style: 'currency',
             currency: currency.toLowerCase()
         });
     }
-    return currencyFormatters[currency].format(value / 100);
+    return window.currencyFormatters[currency].format(value / 100);
 }
 
 // ✅ OTIMIZAÇÃO: Helper para formatar data (cache de formatter)
-const dateFormatter = new Intl.DateTimeFormat('pt-BR', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit'
-});
+// ✅ CORREÇÃO: Protege contra redeclaração - usa apenas window.dateFormatter
+if (typeof window.dateFormatter === 'undefined') {
+    window.dateFormatter = new Intl.DateTimeFormat('pt-BR', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
+}
 
 function formatDate(timestamp) {
     if (!timestamp) return '-';
+    // ✅ CORREÇÃO: Usa window.dateFormatter diretamente (sem criar const local)
+    
     // Se for string de data MySQL (YYYY-MM-DD HH:MM:SS), converte
     if (typeof timestamp === 'string' && timestamp.match(/^\d{4}-\d{2}-\d{2}/)) {
         const date = new Date(timestamp);
-        return dateFormatter.format(date);
+        return window.dateFormatter.format(date);
     }
     // Se for timestamp Unix (número)
     const date = new Date(timestamp * 1000);
-    return dateFormatter.format(date);
+    return window.dateFormatter.format(date);
 }
 
 // Atualiza sidebar baseado no role do usuário

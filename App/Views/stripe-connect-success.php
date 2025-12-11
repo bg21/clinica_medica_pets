@@ -1,10 +1,11 @@
 <?php
 /**
  * View - Sucesso após conectar Stripe
+ * 
+ * ✅ CORREÇÃO: Não inclui base.php manualmente
+ * O View::render() com useLayout=true já faz isso automaticamente
  */
 ?>
-<?php include __DIR__ . '/layouts/base.php'; ?>
-
 <div class="container-fluid py-4">
     <div class="row">
         <div class="col-12">

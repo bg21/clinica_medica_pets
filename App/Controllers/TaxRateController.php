@@ -42,8 +42,14 @@ class TaxRateController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_tax_rate']);
                 return;
             }
@@ -71,13 +77,15 @@ class TaxRateController
                 return;
             }
 
-            // Adiciona tenant_id aos metadados se não existir
-            if (!isset($data['metadata'])) {
-                $data['metadata'] = [];
+            // Adiciona tenant_id aos metadados se não existir (apenas para clínicas)
+            if (!$isSaasAdmin && $tenantId !== null) {
+                if (!isset($data['metadata'])) {
+                    $data['metadata'] = [];
+                }
+                $data['metadata']['tenant_id'] = $tenantId;
             }
-            $data['metadata']['tenant_id'] = $tenantId;
 
-            $taxRate = $this->stripeService->createTaxRate($data);
+            $taxRate = $stripeService->createTaxRate($data);
 
             ResponseHelper::sendCreated([
                 'id' => $taxRate->id,
@@ -123,8 +131,14 @@ class TaxRateController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_tax_rates']);
                 return;
             }
@@ -151,27 +165,31 @@ class TaxRateController
                 $options['ending_before'] = $_GET['ending_before'];
             }
 
-            $collection = $this->stripeService->listTaxRates($options);
+            $collection = $stripeService->listTaxRates($options);
 
             $taxRates = [];
             foreach ($collection->data as $taxRate) {
-                // Filtra apenas tax rates do tenant (via metadata)
-                if (isset($taxRate->metadata->tenant_id) && 
-                    (string)$taxRate->metadata->tenant_id === (string)$tenantId) {
-                    $taxRates[] = [
-                        'id' => $taxRate->id,
-                        'display_name' => $taxRate->display_name,
-                        'description' => $taxRate->description ?? null,
-                        'percentage' => $taxRate->percentage,
-                        'inclusive' => $taxRate->inclusive,
-                        'active' => $taxRate->active,
-                        'country' => $taxRate->country ?? null,
-                        'state' => $taxRate->state ?? null,
-                        'jurisdiction' => $taxRate->jurisdiction ?? null,
-                        'created' => date('Y-m-d H:i:s', $taxRate->created),
-                        'metadata' => $taxRate->metadata->toArray()
-                    ];
+                // ✅ CORREÇÃO: Filtra apenas tax rates do tenant (via metadata) - apenas para clínicas
+                if (!$isSaasAdmin && $tenantId !== null) {
+                    if (isset($taxRate->metadata->tenant_id) && 
+                        (string)$taxRate->metadata->tenant_id !== (string)$tenantId) {
+                        continue; // Pula tax rates de outros tenants
+                    }
                 }
+                
+                $taxRates[] = [
+                    'id' => $taxRate->id,
+                    'display_name' => $taxRate->display_name,
+                    'description' => $taxRate->description ?? null,
+                    'percentage' => $taxRate->percentage,
+                    'inclusive' => $taxRate->inclusive,
+                    'active' => $taxRate->active,
+                    'country' => $taxRate->country ?? null,
+                    'state' => $taxRate->state ?? null,
+                    'jurisdiction' => $taxRate->jurisdiction ?? null,
+                    'created' => date('Y-m-d H:i:s', $taxRate->created),
+                    'metadata' => $taxRate->metadata->toArray()
+                ];
             }
 
             // ✅ CORREÇÃO: Retorna array diretamente, meta separado
@@ -201,19 +219,27 @@ class TaxRateController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_tax_rates']);
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_tax_rate']);
                 return;
             }
 
-            $taxRate = $this->stripeService->getTaxRate($id);
+            $taxRate = $stripeService->getTaxRate($id);
 
-            // Valida se pertence ao tenant (via metadata)
-            if (isset($taxRate->metadata->tenant_id) && 
-                (string)$taxRate->metadata->tenant_id !== (string)$tenantId) {
-                ResponseHelper::sendNotFoundError('Tax rate', ['action' => 'get_tax_rate', 'tax_rate_id' => $id, 'tenant_id' => $tenantId]);
-                return;
+            // ✅ CORREÇÃO: Valida se pertence ao tenant (via metadata) - apenas para clínicas
+            if (!$isSaasAdmin && $tenantId !== null) {
+                if (isset($taxRate->metadata->tenant_id) && 
+                    (string)$taxRate->metadata->tenant_id !== (string)$tenantId) {
+                    ResponseHelper::sendNotFoundError('Tax rate', ['action' => 'get_tax_rate', 'tax_rate_id' => $id, 'tenant_id' => $tenantId]);
+                    return;
+                }
             }
 
             ResponseHelper::sendSuccess([
@@ -265,19 +291,28 @@ class TaxRateController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_tax_rates']);
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'update_tax_rate']);
                 return;
             }
 
             // Primeiro, verifica se o tax rate existe e pertence ao tenant
-            $taxRate = $this->stripeService->getTaxRate($id);
+            $taxRate = $stripeService->getTaxRate($id);
             
-            if (isset($taxRate->metadata->tenant_id) && 
-                (string)$taxRate->metadata->tenant_id !== (string)$tenantId) {
-                ResponseHelper::sendNotFoundError('Tax rate', ['action' => 'update_tax_rate', 'tax_rate_id' => $id, 'tenant_id' => $tenantId]);
-                return;
+            // ✅ CORREÇÃO: Valida se pertence ao tenant (via metadata) - apenas para clínicas
+            if (!$isSaasAdmin && $tenantId !== null) {
+                if (isset($taxRate->metadata->tenant_id) && 
+                    (string)$taxRate->metadata->tenant_id !== (string)$tenantId) {
+                    ResponseHelper::sendNotFoundError('Tax rate', ['action' => 'update_tax_rate', 'tax_rate_id' => $id, 'tenant_id' => $tenantId]);
+                    return;
+                }
             }
 
             // ✅ OTIMIZAÇÃO: Usa RequestCache para evitar múltiplas leituras
@@ -367,7 +402,7 @@ class TaxRateController
                 }
             }
 
-            $taxRate = $this->stripeService->updateTaxRate($id, $data);
+            $taxRate = $stripeService->updateTaxRate($id, $data);
 
             ResponseHelper::sendSuccess([
                 'id' => $taxRate->id,

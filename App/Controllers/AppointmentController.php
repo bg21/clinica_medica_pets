@@ -7,6 +7,8 @@ use App\Models\Pet;
 use App\Models\Customer;
 use App\Models\Professional;
 use App\Services\AppointmentService;
+use App\Services\EmailService;
+use App\Services\Logger;
 use App\Utils\PermissionHelper;
 use App\Utils\ResponseHelper;
 use Flight;
@@ -17,10 +19,29 @@ use Flight;
 class AppointmentController
 {
     private AppointmentService $appointmentService;
+    private EmailService $emailService;
+    private const MODULE_ID = 'appointments';
 
     public function __construct(AppointmentService $appointmentService)
     {
         $this->appointmentService = $appointmentService;
+        $this->emailService = new EmailService();
+    }
+
+    /**
+     * Helper para verificar acesso ao módulo
+     * 
+     * @return array|null Retorna null se tiver acesso, ou array com erro se bloquear
+     */
+    private function checkModuleAccess(): ?array
+    {
+        $tenantId = Flight::get('tenant_id');
+        if ($tenantId === null) {
+            return null; // Deixa outros middlewares tratarem
+        }
+
+        $moduleMiddleware = new \App\Middleware\ModuleAccessMiddleware();
+        return $moduleMiddleware->check(self::MODULE_ID);
     }
     /**
      * Cria um novo agendamento
@@ -35,6 +56,18 @@ class AppointmentController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_appointment']);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "appointments"
+            $check = $this->checkModuleAccess();
+            if ($check) {
+                ResponseHelper::sendError(
+                    $check['message'] ?? 'Módulo não disponível no seu plano',
+                    $check['http_code'] ?? 403,
+                    $check['code'] ?? 'MODULE_NOT_AVAILABLE',
+                    ['module_id' => self::MODULE_ID, 'module_name' => $check['module_name'] ?? 'Agenda']
+                );
                 return;
             }
             
@@ -77,6 +110,33 @@ class AppointmentController
             $responseData = $result['appointment'];
             if ($result['invoice']) {
                 $responseData['invoice'] = $result['invoice'];
+            }
+            
+            // ✅ NOVO: Envia email de agendamento criado
+            try {
+                $appointmentModel = new Appointment();
+                $appointment = $appointmentModel->findById((int)$responseData['id']);
+                
+                if ($appointment) {
+                    $customerModel = new Customer();
+                    $customer = $customerModel->findById((int)$appointment['customer_id']);
+                    
+                    $petModel = new Pet();
+                    $pet = $petModel->findById((int)$appointment['pet_id']);
+                    
+                    $professionalModel = new Professional();
+                    $professional = $professionalModel->findById((int)$appointment['professional_id']);
+                    
+                    if ($customer && $pet && $professional) {
+                        $this->emailService->sendAppointmentCreated($appointment, $customer, $pet, $professional);
+                    }
+                }
+            } catch (\Exception $e) {
+                // Log erro, mas não falha a criação
+                Logger::error('Erro ao enviar email de agendamento criado', [
+                    'error' => $e->getMessage(),
+                    'appointment_id' => $responseData['id'] ?? null
+                ]);
             }
             
             ResponseHelper::sendCreated($responseData, 'Agendamento criado com sucesso');
@@ -225,6 +285,18 @@ class AppointmentController
                 return;
             }
             
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "appointments"
+            $check = $this->checkModuleAccess();
+            if ($check) {
+                ResponseHelper::sendError(
+                    $check['message'] ?? 'Módulo não disponível no seu plano',
+                    $check['http_code'] ?? 403,
+                    $check['code'] ?? 'MODULE_NOT_AVAILABLE',
+                    ['module_id' => self::MODULE_ID, 'module_name' => $check['module_name'] ?? 'Agenda']
+                );
+                return;
+            }
+            
             $data = \App\Utils\RequestCache::getJsonInput();
             
             if ($data === null && json_last_error() !== JSON_ERROR_NONE) {
@@ -233,8 +305,35 @@ class AppointmentController
             }
             
             $appointmentModel = new Appointment();
+            $oldAppointment = $appointmentModel->findById((int)$id);
             $appointmentModel->updateAppointment($tenantId, (int)$id, $data);
             $appointment = $appointmentModel->findById((int)$id);
+            
+            // ✅ NOVO: Envia email se agendamento foi cancelado
+            if (isset($data['status']) && $data['status'] === 'cancelled' && 
+                ($oldAppointment['status'] ?? '') !== 'cancelled') {
+                try {
+                    $customerModel = new Customer();
+                    $customer = $customerModel->findById((int)$appointment['customer_id']);
+                    
+                    $petModel = new Pet();
+                    $pet = $petModel->findById((int)$appointment['pet_id']);
+                    
+                    $professionalModel = new Professional();
+                    $professional = $professionalModel->findById((int)$appointment['professional_id']);
+                    
+                    $cancelReason = $data['cancel_reason'] ?? $data['notes'] ?? null;
+                    
+                    if ($customer && $pet && $professional) {
+                        $this->emailService->sendAppointmentCancelled($appointment, $customer, $pet, $professional, $cancelReason);
+                    }
+                } catch (\Exception $e) {
+                    Logger::error('Erro ao enviar email de agendamento cancelado', [
+                        'error' => $e->getMessage(),
+                        'appointment_id' => $id
+                    ]);
+                }
+            }
             
             ResponseHelper::sendSuccess($appointment, 'Agendamento atualizado com sucesso');
         } catch (\RuntimeException $e) {
@@ -461,6 +560,139 @@ class AppointmentController
                 'Erro ao obter invoice do agendamento',
                 'APPOINTMENT_INVOICE_GET_ERROR',
                 ['action' => 'get_appointment_invoice', 'appointment_id' => $id, 'tenant_id' => $tenantId ?? null]
+            );
+        }
+    }
+
+    /**
+     * Confirma um agendamento
+     * POST /v1/clinic/appointments/:id/confirm
+     */
+    public function confirm(string $id): void
+    {
+        try {
+            PermissionHelper::require('confirm_appointments');
+            
+            $tenantId = Flight::get('tenant_id');
+            
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'confirm_appointment', 'appointment_id' => $id]);
+                return;
+            }
+            
+            $appointmentModel = new Appointment();
+            $appointment = $appointmentModel->findByTenantAndId($tenantId, (int)$id);
+            
+            if (!$appointment) {
+                ResponseHelper::sendNotFoundError('Agendamento', ['action' => 'confirm_appointment', 'appointment_id' => $id, 'tenant_id' => $tenantId]);
+                return;
+            }
+            
+            if ($appointment['status'] !== 'scheduled') {
+                ResponseHelper::sendValidationError(
+                    'Apenas agendamentos marcados podem ser confirmados',
+                    ['status' => 'Status atual: ' . ($appointment['status'] ?? 'N/A')],
+                    ['action' => 'confirm_appointment', 'appointment_id' => $id]
+                );
+                return;
+            }
+            
+            $userId = Flight::get('user_id');
+            
+            // Atualiza status
+            $appointmentModel->update((int)$id, [
+                'status' => 'confirmed',
+                'confirmed_at' => date('Y-m-d H:i:s'),
+                'confirmed_by' => $userId
+            ]);
+            
+            // Busca agendamento atualizado
+            $updated = $appointmentModel->findById((int)$id);
+            
+            // ✅ NOVO: Envia email de agendamento confirmado
+            try {
+                $customerModel = new Customer();
+                $customer = $customerModel->findById((int)$updated['customer_id']);
+                
+                $petModel = new Pet();
+                $pet = $petModel->findById((int)$updated['pet_id']);
+                
+                $professionalModel = new Professional();
+                $professional = $professionalModel->findById((int)$updated['professional_id']);
+                
+                if ($customer && $pet && $professional) {
+                    $this->emailService->sendAppointmentConfirmed($updated, $customer, $pet, $professional);
+                }
+            } catch (\Exception $e) {
+                Logger::error('Erro ao enviar email de agendamento confirmado', [
+                    'error' => $e->getMessage(),
+                    'appointment_id' => $id
+                ]);
+            }
+            
+            ResponseHelper::sendSuccess($updated, 200, 'Agendamento confirmado com sucesso');
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError(
+                $e,
+                'Erro ao confirmar agendamento',
+                'APPOINTMENT_CONFIRM_ERROR',
+                ['action' => 'confirm_appointment', 'appointment_id' => $id, 'tenant_id' => $tenantId ?? null]
+            );
+        }
+    }
+
+    /**
+     * Marca agendamento como concluído
+     * POST /v1/clinic/appointments/:id/complete
+     */
+    public function complete(string $id): void
+    {
+        try {
+            PermissionHelper::require('update_appointments');
+            
+            $tenantId = Flight::get('tenant_id');
+            
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'complete_appointment', 'appointment_id' => $id]);
+                return;
+            }
+            
+            $appointmentModel = new Appointment();
+            $appointment = $appointmentModel->findByTenantAndId($tenantId, (int)$id);
+            
+            if (!$appointment) {
+                ResponseHelper::sendNotFoundError('Agendamento', ['action' => 'complete_appointment', 'appointment_id' => $id, 'tenant_id' => $tenantId]);
+                return;
+            }
+            
+            if (!in_array($appointment['status'], ['scheduled', 'confirmed'])) {
+                ResponseHelper::sendValidationError(
+                    'Apenas agendamentos marcados ou confirmados podem ser concluídos',
+                    ['status' => 'Status atual: ' . ($appointment['status'] ?? 'N/A')],
+                    ['action' => 'complete_appointment', 'appointment_id' => $id]
+                );
+                return;
+            }
+            
+            $userId = Flight::get('user_id');
+            
+            // Atualiza status
+            $appointmentModel->update((int)$id, [
+                'status' => 'completed',
+                'completed_at' => date('Y-m-d H:i:s'),
+                'completed_by' => $userId
+            ]);
+            
+            // Busca agendamento atualizado
+            $updated = $appointmentModel->findById((int)$id);
+            
+            ResponseHelper::sendSuccess($updated, 200, 'Agendamento marcado como concluído');
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError(
+                $e,
+                'Erro ao completar agendamento',
+                'APPOINTMENT_COMPLETE_ERROR',
+                ['action' => 'complete_appointment', 'appointment_id' => $id, 'tenant_id' => $tenantId ?? null]
             );
         }
     }

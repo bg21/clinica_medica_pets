@@ -7,6 +7,7 @@ use App\Models\CommissionConfig;
 use App\Services\CommissionService;
 use App\Utils\PermissionHelper;
 use App\Utils\ResponseHelper;
+use App\Traits\HasModuleAccess;
 use Flight;
 
 /**
@@ -14,11 +15,21 @@ use Flight;
  */
 class CommissionController
 {
+    use HasModuleAccess;
+    
     private CommissionService $commissionService;
+    private Commission $commissionModel;
+    private CommissionConfig $commissionConfigModel;
+    private const MODULE_ID = 'financial';
 
-    public function __construct(CommissionService $commissionService)
-    {
+    public function __construct(
+        CommissionService $commissionService,
+        Commission $commissionModel,
+        CommissionConfig $commissionConfigModel
+    ) {
         $this->commissionService = $commissionService;
+        $this->commissionModel = $commissionModel;
+        $this->commissionConfigModel = $commissionConfigModel;
     }
 
     /**
@@ -34,6 +45,11 @@ class CommissionController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_commissions']);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "financial"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             
@@ -55,8 +71,7 @@ class CommissionController
                 $filters['end_date'] = $queryParams['end_date'];
             }
             
-            $commissionModel = new Commission();
-            $result = $commissionModel->findByTenant($tenantId, $page, $limit, $filters);
+            $result = $this->commissionModel->findByTenant($tenantId, $page, $limit, $filters);
             
             ResponseHelper::sendSuccess($result);
         } catch (\Exception $e) {
@@ -98,8 +113,12 @@ class CommissionController
                 return;
             }
             
-            $commissionModel = new Commission();
-            $commission = $commissionModel->findByTenantAndId($tenantId, $id);
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "financial"
+            if (!$this->checkModuleAccess()) {
+                return;
+            }
+            
+            $commission = $this->commissionModel->findByTenantAndId($tenantId, $id);
             
             if (!$commission) {
                 ResponseHelper::sendNotFoundError('Comissão não encontrada', ['action' => 'get_commission']);
@@ -143,6 +162,11 @@ class CommissionController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'mark_commission_paid']);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "financial"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             
@@ -199,6 +223,11 @@ class CommissionController
                 return;
             }
             
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "financial"
+            if (!$this->checkModuleAccess()) {
+                return;
+            }
+            
             $stats = $this->commissionService->getStatsByUser($tenantId, $userId);
             
             ResponseHelper::sendSuccess($stats);
@@ -233,6 +262,11 @@ class CommissionController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_commission_stats']);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "financial"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             
@@ -292,6 +326,11 @@ class CommissionController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'update_commission_config']);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "financial"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             
@@ -378,11 +417,15 @@ class CommissionController
                 return;
             }
             
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "financial"
+            if (!$this->checkModuleAccess()) {
+                return;
+            }
+            
             // Busca a configuração usando o modelo
             $config = null;
             try {
-                $configModel = new CommissionConfig();
-                $config = $configModel->findByTenant($tenantId);
+                $config = $this->commissionConfigModel->findByTenant($tenantId);
             } catch (\PDOException $e) {
                 // Se a tabela não existir ou houver erro de SQL, retorna configuração padrão
                 \App\Services\Logger::error("Erro ao buscar configuração de comissão no banco", [

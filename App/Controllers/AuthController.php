@@ -499,7 +499,8 @@ class AuthController
                 'ip' => $ipAddress
             ]);
             
-            // Retorna dados do tenant, usuário e sessão
+            // ✅ OBRIGATÓRIO: Retorna dados do tenant, usuário e sessão
+            // Inclui flag indicando que precisa configurar Stripe Connect
             ResponseHelper::sendCreated([
                 'session_id' => $sessionId,
                 'tenant' => [
@@ -512,8 +513,10 @@ class AuthController
                     'email' => $user['email'],
                     'name' => $user['name'],
                     'role' => $user['role'] ?? 'admin'
-                ]
-            ], 'Registro realizado com sucesso. Você já está logado!');
+                ],
+                'requires_stripe_connect' => true, // ✅ Flag indicando que precisa configurar Stripe Connect
+                'stripe_connect_url' => '/stripe-connect' // ✅ URL para configurar
+            ], 'Registro realizado com sucesso! Configure sua conta Stripe para continuar.');
         } catch (\Exception $e) {
             ResponseHelper::sendGenericError(
                 $e,

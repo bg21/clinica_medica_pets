@@ -109,6 +109,30 @@ class Customer extends BaseModel
         
         return $result ?: null;
     }
+    
+    /**
+     * Busca cliente por tenant e Stripe ID (proteção IDOR)
+     * 
+     * @param int $tenantId ID do tenant
+     * @param string $stripeCustomerId ID do Stripe Customer (cus_xxx)
+     * @return array|null Cliente encontrado ou null
+     */
+    public function findByTenantAndStripeId(int $tenantId, string $stripeCustomerId): ?array
+    {
+        $stmt = $this->db->prepare(
+            "SELECT * FROM {$this->table} 
+             WHERE stripe_customer_id = :stripe_customer_id 
+             AND tenant_id = :tenant_id 
+             LIMIT 1"
+        );
+        $stmt->execute([
+            'stripe_customer_id' => $stripeCustomerId,
+            'tenant_id' => $tenantId
+        ]);
+        $result = $stmt->fetch(\PDO::FETCH_ASSOC);
+        
+        return $result ?: null;
+    }
 
     /**
      * Cria ou atualiza cliente

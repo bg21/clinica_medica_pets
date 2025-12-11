@@ -9,23 +9,109 @@ use App\Services\Logger;
 
 /**
  * Serviço wrapper para Stripe API
+ * 
+ * Suporta múltiplas contas Stripe:
+ * - Conta padrão (via STRIPE_SECRET)
+ * - Contas por tenant (Stripe Connect com chave própria)
+ * - Contas Connect (usando stripe_account)
  */
 class StripeService
 {
     private StripeClient $client;
+    private ?string $stripeAccountId = null;
 
-    public function __construct()
+    /**
+     * Construtor
+     * 
+     * @param string|null $secretKey Chave secreta do Stripe (se null, usa STRIPE_SECRET do config)
+     * @param string|null $stripeAccountId ID da conta Connect (opcional, para operações em nome de outra conta)
+     */
+    public function __construct(?string $secretKey = null, ?string $stripeAccountId = null)
     {
-        $secretKey = Config::get('STRIPE_SECRET');
+        // Se não fornecido, usa a chave padrão
+        $secretKey = $secretKey ?? Config::get('STRIPE_SECRET');
+        
         if (empty($secretKey)) {
             throw new \RuntimeException("STRIPE_SECRET não configurado");
         }
 
+        // Armazena stripe_account_id se fornecido
+        $this->stripeAccountId = $stripeAccountId;
+
         // ✅ OTIMIZAÇÃO: Configura timeout para evitar travamento (10 segundos)
-        $this->client = new StripeClient($secretKey, [
+        $clientOptions = [
             'timeout' => 10,  // Timeout de 10 segundos para requisições Stripe
             'connect_timeout' => 5  // Timeout de conexão de 5 segundos
+        ];
+
+        // Se tiver stripe_account_id, adiciona nas opções
+        if ($stripeAccountId) {
+            $clientOptions['stripe_account'] = $stripeAccountId;
+        }
+
+        $this->client = new StripeClient($secretKey, $clientOptions);
+    }
+
+    /**
+     * Cria cliente Stripe para um tenant específico (Stripe Connect)
+     * 
+     * Busca a chave secreta do tenant no banco de dados e cria uma instância
+     * do StripeService configurada para usar essa chave.
+     * 
+     * @param int $tenantId ID do tenant
+     * @return self Instância do StripeService configurada para o tenant
+     * @throws \RuntimeException Se o tenant não tiver chave configurada e não houver fallback
+     */
+    public static function forTenant(int $tenantId): self
+    {
+        $accountModel = new \App\Models\TenantStripeAccount();
+        $account = $accountModel->findByTenant($tenantId);
+        
+        if ($account && !empty($account['stripe_secret_key'])) {
+            // Descriptografa a chave
+            try {
+                $secretKey = \App\Utils\EncryptionHelper::decrypt($account['stripe_secret_key']);
+                
+                Logger::info("StripeService criado para tenant com chave própria", [
+                    'tenant_id' => $tenantId,
+                    'has_stripe_account_id' => !empty($account['stripe_account_id'])
+                ]);
+                
+                return new self($secretKey);
+            } catch (\Exception $e) {
+                Logger::error("Erro ao descriptografar chave do tenant", [
+                    'tenant_id' => $tenantId,
+                    'error' => $e->getMessage()
+                ]);
+                // Fallback para chave padrão
+            }
+        }
+        
+        // Fallback para chave padrão (compatibilidade)
+        Logger::debug("StripeService usando chave padrão para tenant (sem chave própria)", [
+            'tenant_id' => $tenantId
         ]);
+        
+        return new self();
+    }
+
+    /**
+     * Cria cliente Stripe para uma conta Connect específica
+     * 
+     * Usa a chave secreta da plataforma (STRIPE_SECRET) mas opera em nome
+     * de uma conta Connect específica (stripe_account).
+     * 
+     * @param string $stripeAccountId ID da conta Connect (ex: acct_xxx)
+     * @return self Instância do StripeService configurada para a conta Connect
+     */
+    public static function forConnectAccount(string $stripeAccountId): self
+    {
+        Logger::info("StripeService criado para conta Connect", [
+            'stripe_account_id' => $stripeAccountId
+        ]);
+        
+        // Usa chave padrão da plataforma, mas opera em nome da conta Connect
+        return new self(null, $stripeAccountId);
     }
 
     /**
@@ -37,30 +123,79 @@ class StripeService
     }
 
     /**
-     * Cria um cliente no Stripe
+     * Retorna o ID da conta Connect associada (se houver)
+     * 
+     * @return string|null ID da conta Connect ou null se não estiver usando Connect
      */
-    public function createCustomer(array $data): \Stripe\Customer
+    public function getStripeAccountId(): ?string
+    {
+        return $this->stripeAccountId;
+    }
+
+    /**
+     * Verifica se está usando uma conta Connect
+     * 
+     * @return bool True se está operando em nome de uma conta Connect
+     */
+    public function isUsingConnectAccount(): bool
+    {
+        return $this->stripeAccountId !== null;
+    }
+
+    /**
+     * Cria um cliente no Stripe
+     * 
+     * ✅ IDEMPOTÊNCIA: Suporta idempotency key para evitar duplicação em caso de retry
+     * 
+     * @param array $data Dados do cliente
+     * @param string|null $idempotencyKey Chave de idempotência (gerada automaticamente se não fornecida)
+     * @return \Stripe\Customer
+     */
+    public function createCustomer(array $data, ?string $idempotencyKey = null): \Stripe\Customer
     {
         try {
-            $customer = $this->client->customers->create([
+            $customerParams = [
                 'email' => $data['email'] ?? null,
                 'name' => $data['name'] ?? null,
                 'metadata' => $data['metadata'] ?? []
-            ]);
+            ];
+            
+            // ✅ IDEMPOTÊNCIA: Gera chave se não fornecida
+            if (!$idempotencyKey && !isset($data['idempotency_key'])) {
+                $idempotencyKey = $this->generateIdempotencyKey('customer', $data);
+            } elseif (isset($data['idempotency_key'])) {
+                $idempotencyKey = $data['idempotency_key'];
+            }
+            
+            // Prepara opções com idempotency key
+            $options = [];
+            if ($idempotencyKey) {
+                $options['idempotency_key'] = $idempotencyKey;
+            }
+            
+            $customer = $this->client->customers->create($customerParams, $options);
             
             // Invalida cache de listas de customers
             $this->invalidateCustomersListCache();
 
-            Logger::info("Cliente Stripe criado", ['customer_id' => $customer->id]);
+            Logger::info("Cliente Stripe criado", [
+                'customer_id' => $customer->id,
+                'idempotency_key' => $idempotencyKey
+            ]);
             return $customer;
         } catch (ApiErrorException $e) {
-            Logger::error("Erro ao criar cliente Stripe", ['error' => $e->getMessage()]);
+            Logger::error("Erro ao criar cliente Stripe", [
+                'error' => $e->getMessage(),
+                'idempotency_key' => $idempotencyKey ?? null
+            ]);
             throw $e;
         }
     }
 
     /**
      * Cria sessão de checkout
+     * 
+     * ✅ IDEMPOTÊNCIA: Suporta idempotency key para evitar duplicação em caso de retry
      * 
      * @param array $data Dados da sessão:
      *   - customer_id (opcional): ID do customer no Stripe
@@ -72,8 +207,11 @@ class StripeService
      *   - cancel_url (obrigatório): URL de cancelamento
      *   - metadata (opcional): Metadados
      *   - payment_method_collection (opcional): 'always' para sempre coletar método de pagamento
+     *   - idempotency_key (opcional): Chave de idempotência (gerada automaticamente se não fornecida)
+     * @param string|null $idempotencyKey Chave de idempotência (gerada automaticamente se não fornecida)
+     * @return \Stripe\Checkout\Session
      */
-    public function createCheckoutSession(array $data): \Stripe\Checkout\Session
+    public function createCheckoutSession(array $data, ?string $idempotencyKey = null): \Stripe\Checkout\Session
     {
         try {
             $sessionParams = [
@@ -100,12 +238,31 @@ class StripeService
                 $sessionParams['payment_method_collection'] = $data['payment_method_collection'];
             }
 
-            $session = $this->client->checkout->sessions->create($sessionParams);
+            // ✅ IDEMPOTÊNCIA: Gera chave se não fornecida
+            if (!$idempotencyKey && !isset($data['idempotency_key'])) {
+                $idempotencyKey = $this->generateIdempotencyKey('checkout_session', $data);
+            } elseif (isset($data['idempotency_key'])) {
+                $idempotencyKey = $data['idempotency_key'];
+            }
 
-            Logger::info("Sessão de checkout criada", ['session_id' => $session->id]);
+            // Prepara opções com idempotency key
+            $options = [];
+            if ($idempotencyKey) {
+                $options['idempotency_key'] = $idempotencyKey;
+            }
+
+            $session = $this->client->checkout->sessions->create($sessionParams, $options);
+
+            Logger::info("Sessão de checkout criada", [
+                'session_id' => $session->id,
+                'idempotency_key' => $idempotencyKey
+            ]);
             return $session;
         } catch (ApiErrorException $e) {
-            Logger::error("Erro ao criar sessão de checkout", ['error' => $e->getMessage()]);
+            Logger::error("Erro ao criar sessão de checkout", [
+                'error' => $e->getMessage(),
+                'idempotency_key' => $idempotencyKey ?? null
+            ]);
             throw $e;
         }
     }
@@ -121,7 +278,16 @@ class StripeService
      *   - payment_behavior (opcional): Comportamento de pagamento (default_incomplete, etc)
      *   - default_payment_method (opcional): ID do método de pagamento padrão
      */
-    public function createSubscription(array $data): \Stripe\Subscription
+    /**
+     * Cria assinatura no Stripe
+     * 
+     * ✅ IDEMPOTÊNCIA: Suporta idempotency key para evitar duplicação em caso de retry
+     * 
+     * @param array $data Dados da assinatura
+     * @param string|null $idempotencyKey Chave de idempotência (gerada automaticamente se não fornecida)
+     * @return \Stripe\Subscription
+     */
+    public function createSubscription(array $data, ?string $idempotencyKey = null): \Stripe\Subscription
     {
         try {
             $subscriptionParams = [
@@ -145,12 +311,31 @@ class StripeService
                 $subscriptionParams['default_payment_method'] = $data['default_payment_method'];
             }
 
-            $subscription = $this->client->subscriptions->create($subscriptionParams);
+            // ✅ IDEMPOTÊNCIA: Gera chave se não fornecida
+            if (!$idempotencyKey && !isset($data['idempotency_key'])) {
+                $idempotencyKey = $this->generateIdempotencyKey('subscription', $data);
+            } elseif (isset($data['idempotency_key'])) {
+                $idempotencyKey = $data['idempotency_key'];
+            }
 
-            Logger::info("Assinatura criada", ['subscription_id' => $subscription->id]);
+            // Prepara opções com idempotency key
+            $options = [];
+            if ($idempotencyKey) {
+                $options['idempotency_key'] = $idempotencyKey;
+            }
+
+            $subscription = $this->client->subscriptions->create($subscriptionParams, $options);
+
+            Logger::info("Assinatura criada", [
+                'subscription_id' => $subscription->id,
+                'idempotency_key' => $idempotencyKey
+            ]);
             return $subscription;
         } catch (ApiErrorException $e) {
-            Logger::error("Erro ao criar assinatura", ['error' => $e->getMessage()]);
+            Logger::error("Erro ao criar assinatura", [
+                'error' => $e->getMessage(),
+                'idempotency_key' => $idempotencyKey ?? null
+            ]);
             throw $e;
         }
     }
@@ -293,6 +478,8 @@ class StripeService
     /**
      * Cria Payment Intent para pagamento único
      * 
+     * ✅ IDEMPOTÊNCIA: Suporta idempotency key para evitar duplicação em caso de retry
+     * 
      * @param array $data Dados do payment intent:
      *   - amount (obrigatório): Valor em centavos (ex: 2999 para R$ 29,99)
      *   - currency (obrigatório): Moeda (ex: 'brl', 'usd')
@@ -303,9 +490,11 @@ class StripeService
      *   - metadata (opcional): Metadados
      *   - confirm (opcional): Se true, confirma o pagamento imediatamente (padrão: false)
      *   - capture_method (opcional): 'automatic' ou 'manual' (padrão: 'automatic')
+     *   - idempotency_key (opcional): Chave de idempotência (gerada automaticamente se não fornecida)
+     * @param string|null $idempotencyKey Chave de idempotência (gerada automaticamente se não fornecida)
      * @return \Stripe\PaymentIntent
      */
-    public function createPaymentIntent(array $data): \Stripe\PaymentIntent
+    public function createPaymentIntent(array $data, ?string $idempotencyKey = null): \Stripe\PaymentIntent
     {
         try {
             $params = [
@@ -338,18 +527,35 @@ class StripeService
                 $params['capture_method'] = $data['capture_method'];
             }
 
-            $paymentIntent = $this->client->paymentIntents->create($params);
+            // ✅ IDEMPOTÊNCIA: Gera chave se não fornecida
+            if (!$idempotencyKey && !isset($data['idempotency_key'])) {
+                $idempotencyKey = $this->generateIdempotencyKey('payment_intent', $data);
+            } elseif (isset($data['idempotency_key'])) {
+                $idempotencyKey = $data['idempotency_key'];
+            }
+
+            // Prepara opções com idempotency key
+            $options = [];
+            if ($idempotencyKey) {
+                $options['idempotency_key'] = $idempotencyKey;
+            }
+
+            $paymentIntent = $this->client->paymentIntents->create($params, $options);
 
             Logger::info("Payment Intent criado", [
                 'payment_intent_id' => $paymentIntent->id,
                 'amount' => $paymentIntent->amount,
                 'currency' => $paymentIntent->currency,
-                'status' => $paymentIntent->status
+                'status' => $paymentIntent->status,
+                'idempotency_key' => $idempotencyKey
             ]);
 
             return $paymentIntent;
         } catch (ApiErrorException $e) {
-            Logger::error("Erro ao criar payment intent", ['error' => $e->getMessage()]);
+            Logger::error("Erro ao criar payment intent", [
+                'error' => $e->getMessage(),
+                'idempotency_key' => $idempotencyKey ?? null
+            ]);
             throw $e;
         }
     }
@@ -831,7 +1037,7 @@ $refundParams['amount'] = (int)$options['amount'];
     /**
      * Obtém assinatura por ID
      */
-    public function getSubscription(string $subscriptionId): \Stripe\Subscription
+    public function getSubscription(string $subscriptionId, array $options = []): \Stripe\Subscription
     {
         try {
             // Cache de 1 minuto para assinaturas (mudam mais frequentemente)
@@ -842,7 +1048,13 @@ $refundParams['amount'] = (int)$options['amount'];
                 return \Stripe\Subscription::constructFrom($cached, null);
             }
             
-            $subscription = $this->client->subscriptions->retrieve($subscriptionId);
+            // ✅ CORREÇÃO: Aceita opções como expand
+            $retrieveParams = [];
+            if (!empty($options['expand'])) {
+                $retrieveParams['expand'] = $options['expand'];
+            }
+            
+            $subscription = $this->client->subscriptions->retrieve($subscriptionId, $retrieveParams);
             
             // Salva no cache (1 minuto)
             \App\Services\CacheService::setJson($cacheKey, $subscription->toArray(), 60);
@@ -1085,6 +1297,11 @@ $refundParams['amount'] = (int)$options['amount'];
 
             if (!empty($options['currency'])) {
                 $params['currency'] = strtolower($options['currency']);
+            }
+            
+            // ✅ CORREÇÃO: Suporta expand para incluir objetos relacionados (ex: product)
+            if (!empty($options['expand']) && is_array($options['expand'])) {
+                $params['expand'] = $options['expand'];
             }
 
             $prices = $this->client->prices->all($params);
@@ -1347,6 +1564,32 @@ $refundParams['amount'] = (int)$options['amount'];
         } catch (ApiErrorException $e) {
             Logger::error("Erro ao deletar cupom", [
                 'coupon_id' => $couponId,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Obtém método de pagamento por ID
+     * 
+     * @param string $paymentMethodId ID do payment method no Stripe
+     * @return \Stripe\PaymentMethod
+     */
+    public function getPaymentMethod(string $paymentMethodId): \Stripe\PaymentMethod
+    {
+        try {
+            $paymentMethod = $this->client->paymentMethods->retrieve($paymentMethodId);
+            
+            Logger::info("Payment method obtido", [
+                'payment_method_id' => $paymentMethodId,
+                'type' => $paymentMethod->type ?? 'N/A'
+            ]);
+            
+            return $paymentMethod;
+        } catch (ApiErrorException $e) {
+            Logger::error("Erro ao obter payment method", [
+                'payment_method_id' => $paymentMethodId,
                 'error' => $e->getMessage()
             ]);
             throw $e;
@@ -3649,6 +3892,59 @@ $refundParams['amount'] = (int)$options['amount'];
      * Invalida cache de cupons
      * Chamado quando cupons são criados, atualizados ou deletados
      */
+    /**
+     * Gera chave de idempotência baseada nos dados da operação
+     * 
+     * ✅ IDEMPOTÊNCIA: Gera chave única baseada nos dados para evitar duplicação
+     * 
+     * @param string $operationType Tipo da operação (ex: 'payment_intent', 'subscription', 'checkout_session')
+     * @param array $data Dados da operação
+     * @return string Chave de idempotência
+     */
+    private function generateIdempotencyKey(string $operationType, array $data): string
+    {
+        // Prepara dados relevantes para gerar a chave
+        $keyData = [
+            'operation' => $operationType,
+            'amount' => $data['amount'] ?? null,
+            'currency' => $data['currency'] ?? null,
+            'customer_id' => $data['customer_id'] ?? null,
+            'price_id' => $data['price_id'] ?? null,
+            'line_items' => isset($data['line_items']) ? json_encode($data['line_items']) : null,
+            'mode' => $data['mode'] ?? null,
+            'tenant_id' => $data['metadata']['tenant_id'] ?? null,
+            'timestamp' => time() // Adiciona timestamp para garantir unicidade
+        ];
+        
+        // Remove valores null para garantir consistência
+        $keyData = array_filter($keyData, function($value) {
+            return $value !== null;
+        });
+        
+        // Gera hash SHA256 dos dados
+        $hash = hash('sha256', json_encode($keyData, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        
+        // Prefixo baseado no tipo de operação
+        $prefixMap = [
+            'payment_intent' => 'pi',
+            'subscription' => 'sub',
+            'checkout_session' => 'cs',
+            'customer' => 'cus'
+        ];
+        $prefix = $prefixMap[$operationType] ?? 'op';
+        
+        // Retorna chave no formato: prefix_hash (máximo 255 caracteres para Stripe)
+        $idempotencyKey = $prefix . '_' . substr($hash, 0, 200);
+        
+        Logger::debug("Chave de idempotência gerada", [
+            'operation_type' => $operationType,
+            'idempotency_key' => $idempotencyKey,
+            'key_length' => strlen($idempotencyKey)
+        ]);
+        
+        return $idempotencyKey;
+    }
+
     private function invalidateCouponsCache(): void
     {
         try {
@@ -3682,6 +3978,179 @@ $refundParams['amount'] = (int)$options['amount'];
             }
         } catch (\Exception $e) {
             Logger::warning("Erro ao invalidar cache de customers", ['error' => $e->getMessage()]);
+        }
+    }
+
+    /**
+     * Cria schedule para agendar mudanças em uma assinatura
+     * 
+     * @param string $subscriptionId ID da assinatura no Stripe
+     * @param array $data Dados do schedule:
+     *   - phases (obrigatório): Array de fases do schedule
+     *     - start_date (opcional): Data de início (timestamp, padrão: agora)
+     *     - end_date (opcional): Data de fim (timestamp)
+     *     - items (obrigatório): Array de items [{ price: 'price_xxx', quantity: 1 }]
+     *     - metadata (opcional): Metadados
+     *   - metadata (opcional): Metadados do schedule
+     * @return \Stripe\SubscriptionSchedule
+     */
+    public function createSubscriptionSchedule(string $subscriptionId, array $data): \Stripe\SubscriptionSchedule
+    {
+        try {
+            $params = [
+                'subscription' => $subscriptionId
+            ];
+
+            if (!empty($data['phases'])) {
+                $params['phases'] = $data['phases'];
+            }
+
+            if (isset($data['metadata'])) {
+                $params['metadata'] = $data['metadata'];
+            }
+
+            $schedule = $this->client->subscriptionSchedules->create($params);
+
+            Logger::info("Subscription schedule criado", [
+                'schedule_id' => $schedule->id,
+                'subscription_id' => $subscriptionId,
+                'phases_count' => count($schedule->phases ?? [])
+            ]);
+
+            return $schedule;
+        } catch (ApiErrorException $e) {
+            Logger::error("Erro ao criar subscription schedule", [
+                'subscription_id' => $subscriptionId,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Obtém schedule de uma assinatura
+     * 
+     * @param string $subscriptionId ID da assinatura no Stripe
+     * @return \Stripe\SubscriptionSchedule|null
+     */
+    public function getSubscriptionSchedule(string $subscriptionId): ?\Stripe\SubscriptionSchedule
+    {
+        try {
+            // Lista schedules da assinatura
+            $schedules = $this->client->subscriptionSchedules->all([
+                'subscription' => $subscriptionId,
+                'limit' => 1
+            ]);
+
+            if (!empty($schedules->data)) {
+                return $schedules->data[0];
+            }
+
+            return null;
+        } catch (ApiErrorException $e) {
+            Logger::error("Erro ao obter subscription schedule", [
+                'subscription_id' => $subscriptionId,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Cancela schedule de uma assinatura
+     * 
+     * @param string $scheduleId ID do schedule no Stripe
+     * @return \Stripe\SubscriptionSchedule
+     */
+    public function cancelSubscriptionSchedule(string $scheduleId): \Stripe\SubscriptionSchedule
+    {
+        try {
+            $schedule = $this->client->subscriptionSchedules->cancel($scheduleId);
+
+            Logger::info("Subscription schedule cancelado", [
+                'schedule_id' => $scheduleId
+            ]);
+
+            return $schedule;
+        } catch (ApiErrorException $e) {
+            Logger::error("Erro ao cancelar subscription schedule", [
+                'schedule_id' => $scheduleId,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Pausa uma assinatura
+     * 
+     * @param string $subscriptionId ID da assinatura no Stripe
+     * @param array $options Opções:
+     *   - pause_collection (opcional): Configuração de pausa de cobrança
+     *     - behavior (opcional): 'keep_as_draft' ou 'mark_uncollectible' (padrão: 'keep_as_draft')
+     *     - resumes_at (opcional): Timestamp para retomar automaticamente
+     * @return \Stripe\Subscription
+     */
+    public function pauseSubscription(string $subscriptionId, array $options = []): \Stripe\Subscription
+    {
+        try {
+            $updateParams = [
+                'pause_collection' => $options['pause_collection'] ?? [
+                    'behavior' => $options['pause_collection']['behavior'] ?? 'keep_as_draft'
+                ]
+            ];
+
+            if (isset($options['pause_collection']['resumes_at'])) {
+                $updateParams['pause_collection']['resumes_at'] = $options['pause_collection']['resumes_at'];
+            }
+
+            $subscription = $this->client->subscriptions->update($subscriptionId, $updateParams);
+
+            // Invalida cache
+            \App\Services\CacheService::delete('stripe:subscription:' . $subscriptionId);
+
+            Logger::info("Assinatura pausada", [
+                'subscription_id' => $subscriptionId,
+                'pause_collection' => $updateParams['pause_collection']
+            ]);
+
+            return $subscription;
+        } catch (ApiErrorException $e) {
+            Logger::error("Erro ao pausar assinatura", [
+                'subscription_id' => $subscriptionId,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Retoma uma assinatura pausada
+     * 
+     * @param string $subscriptionId ID da assinatura no Stripe
+     * @return \Stripe\Subscription
+     */
+    public function resumeSubscription(string $subscriptionId): \Stripe\Subscription
+    {
+        try {
+            $subscription = $this->client->subscriptions->update($subscriptionId, [
+                'pause_collection' => null
+            ]);
+
+            // Invalida cache
+            \App\Services\CacheService::delete('stripe:subscription:' . $subscriptionId);
+
+            Logger::info("Assinatura retomada", [
+                'subscription_id' => $subscriptionId
+            ]);
+
+            return $subscription;
+        } catch (ApiErrorException $e) {
+            Logger::error("Erro ao retomar assinatura", [
+                'subscription_id' => $subscriptionId,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
         }
     }
 }

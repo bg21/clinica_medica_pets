@@ -137,6 +137,10 @@ class ContainerBindings
             );
         }, true);
         
+        // ✅ NOVO: Services de métricas e alertas Stripe
+        $container->bind(\App\Services\StripeMetricsService::class, \App\Services\StripeMetricsService::class, true);
+        $container->bind(\App\Services\StripeAlertService::class, \App\Services\StripeAlertService::class, true);
+        
         // ============================================
         // CONTROLLERS (não são singletons - nova instância por request)
         // ============================================
@@ -286,6 +290,15 @@ class ContainerBindings
             );
         }, false);
         
+        // Controller de comissões
+        $container->bind(\App\Controllers\CommissionController::class, function(Container $container) {
+            return new \App\Controllers\CommissionController(
+                $container->make(\App\Services\CommissionService::class),
+                $container->make(\App\Models\Commission::class),
+                $container->make(\App\Models\CommissionConfig::class)
+            );
+        }, false);
+        
         // Controllers que precisam de services
         $container->bind(\App\Controllers\ReportController::class, function(Container $container) {
             return new \App\Controllers\ReportController(
@@ -298,6 +311,14 @@ class ContainerBindings
         $container->bind(\App\Controllers\SwaggerController::class, \App\Controllers\SwaggerController::class, false);
         $container->bind(\App\Controllers\PermissionController::class, \App\Controllers\PermissionController::class, false);
         $container->bind(\App\Controllers\TraceController::class, \App\Controllers\TraceController::class, false);
+        
+        // ✅ NOVO: Controller de métricas Stripe
+        $container->bind(\App\Controllers\StripeMetricsController::class, function(Container $container) {
+            return new \App\Controllers\StripeMetricsController(
+                $container->make(\App\Services\StripeMetricsService::class),
+                $container->make(\App\Services\StripeAlertService::class)
+            );
+        }, false);
         
         // Controllers de Clínica Veterinária
         $container->bind(\App\Controllers\PetController::class, \App\Controllers\PetController::class, false);
@@ -354,12 +375,8 @@ class ContainerBindings
             );
         }, false);
         
-        // Controller de Comissões
-        $container->bind(\App\Controllers\CommissionController::class, function(Container $container) {
-            return new \App\Controllers\CommissionController(
-                $container->make(\App\Services\CommissionService::class)
-            );
-        }, false);
+        // ✅ NOTA: CommissionController já está registrado acima (linha 294)
+        // Não registrar novamente para evitar sobrescrever o binding correto
         
         // AuthController e UserController precisam de dependências específicas
         $container->bind(\App\Controllers\AuthController::class, function(Container $container) {

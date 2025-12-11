@@ -59,6 +59,16 @@ class PermissionHelper
     public static function require(string $permission): void
     {
         try {
+            // ✅ CORREÇÃO: SaaS admins têm todas as permissões
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            if ($isSaasAdmin) {
+                Logger::debug("Permissão concedida automaticamente para SaaS admin", [
+                    'permission' => $permission,
+                    'is_saas_admin' => $isSaasAdmin
+                ]);
+                return;
+            }
+            
             // Se não é autenticação de usuário, não verifica permissões
             if (!self::shouldCheckPermissions()) {
                 Logger::debug("Permissões não verificadas (API Key ou Master Key)", [
@@ -101,19 +111,27 @@ class PermissionHelper
                 ]));
                 return;
             }
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             Logger::error("Erro ao verificar permissão no PermissionHelper", [
                 'permission' => $permission,
                 'user_id' => Flight::get('user_id'),
                 'user_role' => Flight::get('user_role'),
+                'is_user_auth' => Flight::get('is_user_auth'),
+                'is_master' => Flight::get('is_master'),
                 'error' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
                 'trace' => $e->getTraceAsString()
             ]);
-            // Em caso de erro, bloqueia por segurança
-            Flight::halt(500, json_encode([
-                'error' => 'Erro interno do servidor',
-                'message' => 'Erro ao verificar permissões'
-            ]));
+            // Em caso de erro, se não for autenticação de usuário, permite continuar
+            // Se for autenticação de usuário, bloqueia por segurança
+            if (self::shouldCheckPermissions()) {
+                Flight::halt(500, json_encode([
+                    'error' => 'Erro interno do servidor',
+                    'message' => 'Erro ao verificar permissões'
+                ]));
+            }
+            // Se não precisa verificar permissões, continua normalmente
         }
     }
 

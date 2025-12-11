@@ -44,8 +44,14 @@ class InvoiceItemController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_invoice_item']);
                 return;
             }
@@ -91,13 +97,15 @@ class InvoiceItemController
                 return;
             }
 
-            // Valida se customer existe e pertence ao tenant
-            $customerModel = new \App\Models\Customer();
-            $customer = $customerModel->findByStripeId($data['customer_id']);
-            
-            if (!$customer || $customer['tenant_id'] != $tenantId) {
-                ResponseHelper::sendNotFoundError('Customer', ['action' => 'create_invoice_item', 'customer_id' => $data['customer_id'], 'tenant_id' => $tenantId]);
-                return;
+            // ✅ CORREÇÃO: Valida customer apenas para clínicas (não para SaaS admin)
+            if (!$isSaasAdmin && $tenantId !== null) {
+                $customerModel = new \App\Models\Customer();
+                $customer = $customerModel->findByStripeId($data['customer_id']);
+                
+                if (!$customer || $customer['tenant_id'] != $tenantId) {
+                    ResponseHelper::sendNotFoundError('Customer', ['action' => 'create_invoice_item', 'customer_id' => $data['customer_id'], 'tenant_id' => $tenantId]);
+                    return;
+                }
             }
 
             // Adiciona tenant_id aos metadados se não existir
@@ -106,7 +114,7 @@ class InvoiceItemController
             }
             $data['metadata']['tenant_id'] = $tenantId;
 
-            $invoiceItem = $this->stripeService->createInvoiceItem($data);
+            $invoiceItem = $stripeService->createInvoiceItem($data);
 
             ResponseHelper::sendCreated([
                 'id' => $invoiceItem->id,
@@ -146,8 +154,13 @@ class InvoiceItemController
         try {
             $tenantId = Flight::get('tenant_id');
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_invoice_item']);
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_invoice_items']);
                 return;
             }
 
@@ -177,7 +190,7 @@ class InvoiceItemController
                 $options['ending_before'] = $_GET['ending_before'];
             }
 
-            $collection = $this->stripeService->listInvoiceItems($options);
+            $collection = $stripeService->listInvoiceItems($options);
 
             // ✅ OTIMIZAÇÃO: Busca todos os customers de uma vez (elimina N+1)
             $customerModel = new \App\Models\Customer();
@@ -269,7 +282,7 @@ class InvoiceItemController
                 return;
             }
 
-            $invoiceItem = $this->stripeService->getInvoiceItem($id);
+            $invoiceItem = $stripeService->getInvoiceItem($id);
 
             // Valida se pertence ao tenant (via metadata ou customer)
             $isTenantItem = false;
@@ -343,14 +356,20 @@ class InvoiceItemController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_invoice_item']);
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'update_invoice_item']);
                 return;
             }
 
             // Primeiro, verifica se o invoice item existe e pertence ao tenant
-            $invoiceItem = $this->stripeService->getInvoiceItem($id);
+            $invoiceItem = $stripeService->getInvoiceItem($id);
             
             $isTenantItem = false;
             if (isset($invoiceItem->metadata->tenant_id) && 
@@ -392,7 +411,7 @@ class InvoiceItemController
                 }
             }
 
-            $invoiceItem = $this->stripeService->updateInvoiceItem($id, $data);
+            $invoiceItem = $stripeService->updateInvoiceItem($id, $data);
 
             ResponseHelper::sendSuccess([
                 'id' => $invoiceItem->id,
@@ -436,14 +455,20 @@ class InvoiceItemController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_invoice_item']);
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'delete_invoice_item']);
                 return;
             }
 
             // Primeiro, verifica se o invoice item existe e pertence ao tenant
-            $invoiceItem = $this->stripeService->getInvoiceItem($id);
+            $invoiceItem = $stripeService->getInvoiceItem($id);
             
             $isTenantItem = false;
             if (isset($invoiceItem->metadata->tenant_id) && 
@@ -464,7 +489,7 @@ class InvoiceItemController
                 return;
             }
 
-            $this->stripeService->deleteInvoiceItem($id);
+            $stripeService->deleteInvoiceItem($id);
 
             ResponseHelper::sendSuccess(null, 200, 'Invoice item removido com sucesso');
         } catch (\Stripe\Exception\InvalidRequestException $e) {

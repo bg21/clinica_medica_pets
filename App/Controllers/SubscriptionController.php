@@ -107,6 +107,111 @@ class SubscriptionController
             PermissionHelper::require('view_subscriptions');
             
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // Se for administrador SaaS, busca diretamente do Stripe (conta principal)
+            if ($isSaasAdmin && $tenantId === null) {
+                $queryParams = Flight::request()->query;
+                $limit = isset($queryParams['limit']) ? min(100, max(1, (int)$queryParams['limit'])) : 20;
+                $startingAfter = $queryParams['starting_after'] ?? null;
+                
+                $options = ['limit' => $limit];
+                if ($startingAfter) {
+                    $options['starting_after'] = $startingAfter;
+                }
+                if (!empty($queryParams['status'])) {
+                    $options['status'] = $queryParams['status'];
+                }
+                if (!empty($queryParams['customer'])) {
+                    $options['customer'] = $queryParams['customer'];
+                }
+                
+                // Busca diretamente do Stripe usando conta principal
+                $stripeClient = $this->stripeService->getClient();
+                $subscriptions = $stripeClient->subscriptions->all($options);
+                
+                $subscriptionsData = [];
+                foreach ($subscriptions->data as $subscription) {
+                    // Busca nome do produto
+                    $productName = 'Produto não encontrado';
+                    $productId = null;
+                    if (is_string($subscription->items->data[0]->price->product ?? null)) {
+                        $productId = $subscription->items->data[0]->price->product;
+                        try {
+                            $product = $stripeClient->products->retrieve($productId);
+                            $productName = $product->name ?? $productName;
+                        } catch (\Exception $e) {
+                            // Ignora erro ao buscar produto
+                        }
+                    } elseif (isset($subscription->items->data[0]->price->product->name)) {
+                        $productName = $subscription->items->data[0]->price->product->name;
+                        $productId = $subscription->items->data[0]->price->product->id;
+                    }
+                    
+                    // Busca dados do customer
+                    $customerId = is_string($subscription->customer) ? $subscription->customer : $subscription->customer->id;
+                    $customerName = 'Cliente não encontrado';
+                    $customerEmail = null;
+                    try {
+                        $customer = $stripeClient->customers->retrieve($customerId);
+                        $customerName = $customer->name ?? $customer->email ?? $customerName;
+                        $customerEmail = $customer->email ?? null;
+                    } catch (\Exception $e) {
+                        // Ignora erro ao buscar customer
+                    }
+                    
+                    // Calcula valor (unit_amount já está em centavos)
+                    $price = $subscription->items->data[0]->price;
+                    $unitAmount = $price->unit_amount ?? 0;
+                    $amount = $unitAmount / 100; // Converte centavos para reais
+                    
+                    // ✅ DEBUG: Log para verificar valores
+                    Logger::debug("Valor da assinatura calculado", [
+                        'subscription_id' => $subscription->id,
+                        'unit_amount' => $unitAmount,
+                        'amount' => $amount,
+                        'currency' => $price->currency ?? 'brl'
+                    ]);
+                    
+                    // Extrai intervalo de recorrência
+                    $interval = null;
+                    if (isset($price->recurring) && isset($price->recurring->interval)) {
+                        $interval = $price->recurring->interval;
+                    }
+                    
+                    $subscriptionsData[] = [
+                        'id' => $subscription->id,
+                        'stripe_subscription_id' => $subscription->id, // Para compatibilidade
+                        'customer_id' => $customerId, // ✅ CORREÇÃO: Usa customer_id para compatibilidade com view
+                        'customer' => $customerId,
+                        'customer_name' => $customerName,
+                        'customer_email' => $customerEmail,
+                        'status' => $subscription->status,
+                        'current_period_start' => date('Y-m-d H:i:s', $subscription->current_period_start),
+                        'current_period_end' => date('Y-m-d H:i:s', $subscription->current_period_end),
+                        'cancel_at_period_end' => $subscription->cancel_at_period_end,
+                        'plan_name' => $productName,
+                        'product_id' => $productId,
+                        'price_id' => $price->id, // ✅ CORREÇÃO: Adiciona price_id
+                        'amount' => (float)$amount, // ✅ CORREÇÃO: Garante que é float, já convertido para reais (não centavos)
+                        'currency' => strtoupper($subscription->currency ?? $price->currency ?? 'brl'),
+                        'interval' => $interval, // ✅ CORREÇÃO: Adiciona intervalo
+                        'created' => date('Y-m-d H:i:s', $subscription->created),
+                        'metadata' => (array)$subscription->metadata
+                    ];
+                }
+                
+                ResponseHelper::sendSuccess($subscriptionsData, 200, null, [
+                    'has_more' => $subscriptions->has_more,
+                    'total' => count($subscriptionsData)
+                ]);
+                return;
+            }
+            
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_subscriptions']);
+                return;
+            }
             
             $queryParams = Flight::request()->query;
             $page = isset($queryParams['page']) ? max(1, (int)$queryParams['page']) : 1;
@@ -187,6 +292,154 @@ class SubscriptionController
     }
 
     /**
+     * Obtém assinatura ativa do tenant logado
+     * GET /v1/subscriptions/current
+     */
+    public function getCurrent(): void
+    {
+        try {
+            // Verifica permissão (só verifica se for autenticação de usuário)
+            PermissionHelper::require('view_subscriptions');
+            
+            $tenantId = Flight::get('tenant_id');
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_current_subscription']);
+                return;
+            }
+
+            try {
+                $subscriptionModel = new \App\Models\Subscription();
+                $subscription = $subscriptionModel->findActiveByTenant($tenantId);
+
+                // ✅ SINCRONIZAÇÃO: Se não encontrou no banco, tenta sincronizar do Stripe
+                if (!$subscription) {
+                    try {
+                        // Busca customer do tenant
+                        $customerModel = new \App\Models\Customer();
+                        $customerResult = $customerModel->findByTenant($tenantId, 1, 1);
+                        $customers = $customerResult['data'] ?? [];
+                        
+                        if (!empty($customers)) {
+                            $customer = $customers[0];
+                            $stripeCustomerId = $customer['stripe_customer_id'];
+                            
+                            // Busca assinaturas ativas do customer no Stripe
+                            // ✅ IMPORTANTE: Usa conta da PLATAFORMA (não do tenant)
+                            $stripeService = new \App\Services\StripeService();
+                            $stripeClient = $stripeService->getClient();
+                            $stripeSubscriptions = $stripeClient->subscriptions->all([
+                                'customer' => $stripeCustomerId,
+                                'status' => 'active',
+                                'limit' => 1
+                            ]);
+                            
+                            // Se encontrou assinatura ativa no Stripe, sincroniza para o banco
+                            if (!empty($stripeSubscriptions->data)) {
+                                $stripeSubscription = $stripeSubscriptions->data[0];
+                                
+                                \App\Services\Logger::info("Sincronizando assinatura do Stripe para o banco", [
+                                    'tenant_id' => $tenantId,
+                                    'customer_id' => $customer['id'],
+                                    'stripe_subscription_id' => $stripeSubscription->id,
+                                    'status' => $stripeSubscription->status
+                                ]);
+                                
+                                // ✅ CORREÇÃO: Expande produto para obter nome
+                                $stripeSubscriptionExpanded = $stripeClient->subscriptions->retrieve($stripeSubscription->id, [
+                                    'expand' => ['items.data.price.product']
+                                ]);
+                                
+                                // Cria/atualiza no banco
+                                $subscriptionId = $subscriptionModel->createOrUpdate(
+                                    $tenantId,
+                                    $customer['id'],
+                                    $stripeSubscriptionExpanded->toArray()
+                                );
+                                
+                                // Busca novamente
+                                $subscription = $subscriptionModel->findActiveByTenant($tenantId);
+                                
+                                if ($subscription) {
+                                    \App\Services\Logger::info("Assinatura sincronizada com sucesso", [
+                                        'subscription_id' => $subscriptionId,
+                                        'tenant_id' => $tenantId
+                                    ]);
+                                }
+                            }
+                        }
+                    } catch (\Exception $e) {
+                        // Log erro, mas não falha a requisição
+                        \App\Services\Logger::warning("Erro ao sincronizar assinatura do Stripe", [
+                            'tenant_id' => $tenantId,
+                            'error' => $e->getMessage()
+                        ]);
+                    }
+                }
+
+                if (!$subscription) {
+                    ResponseHelper::sendSuccess(null, 'Nenhuma assinatura ativa encontrada');
+                    return;
+                }
+
+                // ✅ CORREÇÃO: Se plan_name está vazio, busca do Stripe e atualiza
+                if (empty($subscription['plan_name']) && !empty($subscription['stripe_subscription_id'])) {
+                    try {
+                        $stripeClient = $this->stripeService->getClient();
+                        $stripeSubscription = $stripeClient->subscriptions->retrieve($subscription['stripe_subscription_id'], [
+                            'expand' => ['items.data.price.product']
+                        ]);
+                        
+                        // Atualiza no banco para obter o plan_name
+                        $subscriptionModel->createOrUpdate(
+                            $tenantId,
+                            $subscription['customer_id'],
+                            $stripeSubscription->toArray()
+                        );
+                        
+                        // Busca novamente
+                        $subscription = $subscriptionModel->findActiveByTenant($tenantId);
+                        
+                        \App\Services\Logger::info("plan_name atualizado do Stripe", [
+                            'subscription_id' => $subscription['id'] ?? null,
+                            'plan_name' => $subscription['plan_name'] ?? null
+                        ]);
+                    } catch (\Exception $e) {
+                        \App\Services\Logger::warning("Erro ao atualizar plan_name", [
+                            'subscription_id' => $subscription['id'] ?? null,
+                            'error' => $e->getMessage()
+                        ]);
+                    }
+                }
+
+                // ✅ LOG: Verifica se plan_name está presente
+                \App\Services\Logger::info("Assinatura retornada em getCurrent", [
+                    'subscription_id' => $subscription['id'] ?? null,
+                    'plan_name' => $subscription['plan_name'] ?? null,
+                    'plan_id' => $subscription['plan_id'] ?? null,
+                    'has_plan_name' => isset($subscription['plan_name']) && !empty($subscription['plan_name']),
+                    'all_keys' => array_keys($subscription)
+                ]);
+
+                ResponseHelper::sendSuccess($subscription);
+            } catch (\PDOException $e) {
+                \App\Services\Logger::error("Erro de banco de dados ao buscar assinatura", [
+                    'tenant_id' => $tenantId,
+                    'error' => $e->getMessage(),
+                    'trace' => $e->getTraceAsString()
+                ]);
+                ResponseHelper::sendGenericError($e, 'Erro ao buscar assinatura no banco de dados', 'SUBSCRIPTION_DB_ERROR', ['action' => 'get_current_subscription', 'tenant_id' => $tenantId]);
+            }
+        } catch (\Exception $e) {
+            \App\Services\Logger::error("Erro ao obter assinatura atual", [
+                'tenant_id' => $tenantId ?? null,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            ResponseHelper::sendGenericError($e, 'Erro ao obter assinatura atual', 'SUBSCRIPTION_GET_CURRENT_ERROR', ['action' => 'get_current_subscription', 'tenant_id' => $tenantId ?? null]);
+        }
+    }
+
+    /**
      * Obtém assinatura por ID
      * GET /v1/subscriptions/:id
      */
@@ -196,29 +449,136 @@ class SubscriptionController
             // Verifica permissão (só verifica se for autenticação de usuário)
             PermissionHelper::require('view_subscriptions');
             
-            // Valida ID
-            $idErrors = Validator::validateId($id, 'id');
-            if (!empty($idErrors)) {
+            $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // ✅ CORREÇÃO: Determina se é Stripe ID (sub_xxx) ou ID numérico
+            $isStripeId = preg_match('/^sub_[a-zA-Z0-9]+$/', $id);
+            $isNumericId = preg_match('/^\d+$/', $id);
+            
+            if (!$isStripeId && !$isNumericId) {
                 ResponseHelper::sendValidationError(
                     'ID inválido',
-                    $idErrors,
-                    ['action' => 'cancel_subscription', 'subscription_id' => $id]
+                    ['id' => 'ID deve ser numérico ou um Stripe ID (sub_xxx)'],
+                    ['action' => 'get_subscription', 'subscription_id' => $id]
                 );
                 return;
             }
             
-            $tenantId = Flight::get('tenant_id');
-            
-            // VALIDAÇÃO RIGOROSA: tenant_id não pode ser null
-            if ($tenantId === null) {
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+                
+                // Se for SaaS admin e Stripe ID, busca diretamente do Stripe
+                if ($isStripeId) {
+                    try {
+                        $stripeSubscription = $stripeService->getSubscription($id, ['expand' => ['customer', 'items.data.price.product']]);
+                    } catch (\Stripe\Exception\InvalidRequestException $e) {
+                        if ($e->getStripeCode() === 'resource_missing') {
+                            ResponseHelper::sendNotFoundError('Assinatura', ['action' => 'get_subscription', 'subscription_id' => $id]);
+                            return;
+                        }
+                        throw $e;
+                    }
+                    
+                    // Busca nome do produto
+                    $productName = 'Produto não encontrado';
+                    $priceId = null;
+                    $amount = 0;
+                    $currency = 'BRL';
+                    
+                    if (!empty($stripeSubscription->items->data)) {
+                        $firstItem = $stripeSubscription->items->data[0];
+                        $priceId = $firstItem->price->id ?? null;
+                        $amount = ($firstItem->price->unit_amount ?? 0) / 100;
+                        $currency = strtoupper($firstItem->price->currency ?? 'brl');
+                        
+                        if (isset($firstItem->price->product)) {
+                            $product = $firstItem->price->product;
+                            if (is_object($product) && isset($product->name)) {
+                                $productName = $product->name;
+                            } elseif (is_string($product)) {
+                                try {
+                                    $productObj = $stripeService->getProduct($product);
+                                    $productName = $productObj->name ?? $productName;
+                                } catch (\Exception $e) {
+                                    // Ignora erro
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Busca nome do customer
+                    $customerName = 'Cliente não encontrado';
+                    $customerEmail = null;
+                    if (isset($stripeSubscription->customer)) {
+                        $customer = $stripeSubscription->customer;
+                        if (is_object($customer)) {
+                            $customerName = $customer->name ?? $customer->email ?? $customerName;
+                            $customerEmail = $customer->email ?? null;
+                        } elseif (is_string($customer)) {
+                            try {
+                                $customerObj = $stripeService->getCustomer($customer);
+                                $customerName = $customerObj->name ?? $customerObj->email ?? $customerName;
+                                $customerEmail = $customerObj->email ?? null;
+                            } catch (\Exception $e) {
+                                // Ignora erro
+                            }
+                        }
+                    }
+                    
+                    $responseData = [
+                        'id' => $stripeSubscription->id,
+                        'stripe_subscription_id' => $stripeSubscription->id,
+                        'customer_id' => is_string($stripeSubscription->customer) ? $stripeSubscription->customer : $stripeSubscription->customer->id,
+                        'customer_name' => $customerName,
+                        'customer_email' => $customerEmail,
+                        'status' => $stripeSubscription->status,
+                        'price_id' => $priceId,
+                        'plan_name' => $productName,
+                        'amount' => $amount,
+                        'currency' => $currency,
+                        'current_period_start' => $stripeSubscription->current_period_start ? date('Y-m-d H:i:s', $stripeSubscription->current_period_start) : null,
+                        'current_period_end' => $stripeSubscription->current_period_end ? date('Y-m-d H:i:s', $stripeSubscription->current_period_end) : null,
+                        'cancel_at_period_end' => $stripeSubscription->cancel_at_period_end ?? false,
+                        'canceled_at' => $stripeSubscription->canceled_at ? date('Y-m-d H:i:s', $stripeSubscription->canceled_at) : null,
+                        'trial_start' => $stripeSubscription->trial_start ? date('Y-m-d H:i:s', $stripeSubscription->trial_start) : null,
+                        'trial_end' => $stripeSubscription->trial_end ? date('Y-m-d H:i:s', $stripeSubscription->trial_end) : null,
+                        'items' => array_map(function($item) {
+                            return [
+                                'id' => $item->id,
+                                'price_id' => $item->price->id,
+                                'quantity' => $item->quantity
+                            ];
+                        }, $stripeSubscription->items->data),
+                        'metadata' => $stripeSubscription->metadata->toArray(),
+                        'created_at' => date('Y-m-d H:i:s', $stripeSubscription->created),
+                        'created' => date('Y-m-d H:i:s', $stripeSubscription->created)
+                    ];
+                    
+                    ResponseHelper::sendSuccess($responseData);
+                    return;
+                }
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_subscription', 'subscription_id' => $id]);
                 return;
             }
             
             $subscriptionModel = new \App\Models\Subscription();
             
-            // Buscar diretamente com filtro de tenant (mais seguro - proteção IDOR)
-            $subscription = $subscriptionModel->findByTenantAndId($tenantId, (int)$id);
+            // ✅ CORREÇÃO: Busca por ID numérico ou Stripe ID
+            if ($isStripeId) {
+                // Busca pelo Stripe ID e valida se pertence ao tenant
+                $subscription = $subscriptionModel->findByStripeId($id);
+                if ($subscription && (int)$subscription['tenant_id'] !== (int)$tenantId) {
+                    $subscription = null; // Não pertence ao tenant
+                }
+            } else {
+                // Busca pelo ID numérico do banco
+                $subscription = $subscriptionModel->findByTenantAndId($tenantId, (int)$id);
+            }
 
             if (!$subscription) {
                 ResponseHelper::sendNotFoundError('Assinatura', ['action' => 'get_subscription', 'subscription_id' => $id, 'tenant_id' => $tenantId]);
@@ -236,7 +596,7 @@ class SubscriptionController
 
             // ✅ Sincronização condicional: apenas se cache expirou
             // Busca dados atualizados no Stripe
-            $stripeSubscription = $this->stripeService->getSubscription($subscription['stripe_subscription_id']);
+            $stripeSubscription = $stripeService->getSubscription($subscription['stripe_subscription_id'], ['expand' => ['items.data.price.product']]);
 
             // Atualiza no banco apenas se houver mudanças significativas
             $needsUpdate = false;
@@ -253,16 +613,32 @@ class SubscriptionController
                 );
             }
 
-            // ✅ CORREÇÃO: Extrai amount e currency dos items da assinatura
+            // ✅ CORREÇÃO: Extrai amount, currency e plan_name dos items da assinatura
             $amount = 0;
             $currency = 'BRL';
             $priceId = null;
+            $productName = $subscription['plan_name'] ?? 'Produto não encontrado';
             
             if (!empty($stripeSubscription->items->data)) {
                 $firstItem = $stripeSubscription->items->data[0];
                 $amount = ($firstItem->price->unit_amount ?? 0) / 100; // Converte de centavos para reais
                 $currency = strtoupper($firstItem->price->currency ?? 'brl');
                 $priceId = $firstItem->price->id ?? null;
+                
+                // Busca nome do produto se expandido
+                if (isset($firstItem->price->product)) {
+                    $product = $firstItem->price->product;
+                    if (is_object($product) && isset($product->name)) {
+                        $productName = $product->name;
+                    } elseif (is_string($product)) {
+                        try {
+                            $productObj = $stripeService->getProduct($product);
+                            $productName = $productObj->name ?? $productName;
+                        } catch (\Exception $e) {
+                            // Ignora erro
+                        }
+                    }
+                }
             }
 
             // Prepara resposta
@@ -272,6 +648,7 @@ class SubscriptionController
                 'customer_id' => $subscription['customer_id'],
                 'status' => $stripeSubscription->status,
                 'price_id' => $priceId,
+                'plan_name' => $productName,
                 'amount' => $amount,
                 'currency' => $currency,
                 'current_period_start' => $stripeSubscription->current_period_start ? date('Y-m-d H:i:s', $stripeSubscription->current_period_start) : null,
@@ -944,6 +1321,186 @@ class SubscriptionController
                 'SUBSCRIPTION_HISTORY_STATS_ERROR',
                 ['action' => 'subscription_history_stats', 'subscription_id' => $id, 'tenant_id' => $tenantId]
             );
+        }
+    }
+
+    /**
+     * Agenda mudança de plano para uma assinatura
+     * POST /v1/subscriptions/:id/schedule-plan-change
+     * 
+     * Body JSON:
+     * {
+     *   "new_price_id": "price_xxx",
+     *   "start_date": 1234567890,  // opcional - timestamp (padrão: fim do período atual)
+     *   "metadata": {}  // opcional
+     * }
+     */
+    public function schedulePlanChange(string $id): void
+    {
+        try {
+            PermissionHelper::require('update_subscriptions');
+            
+            $tenantId = Flight::get('tenant_id');
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'schedule_plan_change', 'subscription_id' => $id]);
+                return;
+            }
+
+            $data = \App\Utils\RequestCache::getJsonInput();
+            if ($data === null && json_last_error() !== JSON_ERROR_NONE) {
+                ResponseHelper::sendInvalidJsonError(['action' => 'schedule_plan_change', 'subscription_id' => $id]);
+                return;
+            }
+
+            if (empty($data['new_price_id'])) {
+                ResponseHelper::sendValidationError(
+                    'new_price_id é obrigatório',
+                    ['new_price_id' => 'Obrigatório'],
+                    ['action' => 'schedule_plan_change', 'subscription_id' => $id]
+                );
+                return;
+            }
+
+            $subscriptionModel = new \App\Models\Subscription();
+            $subscription = $subscriptionModel->findByTenantAndId($tenantId, (int)$id);
+            
+            if (!$subscription) {
+                ResponseHelper::sendNotFoundError('Assinatura', ['action' => 'schedule_plan_change', 'subscription_id' => $id]);
+                return;
+            }
+
+            $paymentService = new \App\Services\PaymentService(
+                $this->stripeService,
+                new \App\Models\Customer(),
+                $subscriptionModel,
+                new \App\Models\StripeEvent()
+            );
+
+            $startDate = isset($data['start_date']) ? (int)$data['start_date'] : null;
+            $metadata = $data['metadata'] ?? [];
+
+            $schedule = $paymentService->schedulePlanChange(
+                $subscription['stripe_subscription_id'],
+                $data['new_price_id'],
+                $startDate,
+                $metadata
+            );
+
+            ResponseHelper::sendSuccess([
+                'schedule_id' => $schedule->id,
+                'subscription_id' => $id,
+                'new_price_id' => $data['new_price_id'],
+                'start_date' => $startDate ? date('Y-m-d H:i:s', $startDate) : 'end_of_period'
+            ], 200, 'Mudança de plano agendada com sucesso');
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError($e, 'Erro ao agendar mudança de plano', 'SUBSCRIPTION_SCHEDULE_PLAN_CHANGE_ERROR', ['action' => 'schedule_plan_change', 'subscription_id' => $id, 'tenant_id' => $tenantId ?? null]);
+        }
+    }
+
+    /**
+     * Pausa uma assinatura
+     * POST /v1/subscriptions/:id/pause
+     * 
+     * Body JSON (opcional):
+     * {
+     *   "pause_collection": {
+     *     "behavior": "keep_as_draft",  // ou "mark_uncollectible"
+     *     "resumes_at": 1234567890  // opcional - timestamp para retomar automaticamente
+     *   }
+     * }
+     */
+    public function pause(string $id): void
+    {
+        try {
+            PermissionHelper::require('update_subscriptions');
+            
+            $tenantId = Flight::get('tenant_id');
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'pause_subscription', 'subscription_id' => $id]);
+                return;
+            }
+
+            $data = \App\Utils\RequestCache::getJsonInput();
+            if ($data === null && json_last_error() !== JSON_ERROR_NONE) {
+                ResponseHelper::sendInvalidJsonError(['action' => 'pause_subscription', 'subscription_id' => $id]);
+                return;
+            }
+
+            $subscriptionModel = new \App\Models\Subscription();
+            $subscription = $subscriptionModel->findByTenantAndId($tenantId, (int)$id);
+            
+            if (!$subscription) {
+                ResponseHelper::sendNotFoundError('Assinatura', ['action' => 'pause_subscription', 'subscription_id' => $id]);
+                return;
+            }
+
+            $paymentService = new \App\Services\PaymentService(
+                $this->stripeService,
+                new \App\Models\Customer(),
+                $subscriptionModel,
+                new \App\Models\StripeEvent()
+            );
+
+            $options = $data['pause_collection'] ?? [];
+            $stripeSubscription = $paymentService->pauseSubscription($subscription['stripe_subscription_id'], ['pause_collection' => $options]);
+
+            // Atualiza no banco
+            $subscriptionModel->createOrUpdate($tenantId, $subscription['customer_id'], $stripeSubscription->toArray());
+
+            ResponseHelper::sendSuccess([
+                'subscription_id' => $id,
+                'status' => $stripeSubscription->status,
+                'pause_collection' => $stripeSubscription->pause_collection ? [
+                    'behavior' => $stripeSubscription->pause_collection->behavior ?? null,
+                    'resumes_at' => $stripeSubscription->pause_collection->resumes_at ? date('Y-m-d H:i:s', $stripeSubscription->pause_collection->resumes_at) : null
+                ] : null
+            ], 200, 'Assinatura pausada com sucesso');
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError($e, 'Erro ao pausar assinatura', 'SUBSCRIPTION_PAUSE_ERROR', ['action' => 'pause_subscription', 'subscription_id' => $id, 'tenant_id' => $tenantId ?? null]);
+        }
+    }
+
+    /**
+     * Retoma uma assinatura pausada
+     * POST /v1/subscriptions/:id/resume
+     */
+    public function resume(string $id): void
+    {
+        try {
+            PermissionHelper::require('update_subscriptions');
+            
+            $tenantId = Flight::get('tenant_id');
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'resume_subscription', 'subscription_id' => $id]);
+                return;
+            }
+
+            $subscriptionModel = new \App\Models\Subscription();
+            $subscription = $subscriptionModel->findByTenantAndId($tenantId, (int)$id);
+            
+            if (!$subscription) {
+                ResponseHelper::sendNotFoundError('Assinatura', ['action' => 'resume_subscription', 'subscription_id' => $id]);
+                return;
+            }
+
+            $paymentService = new \App\Services\PaymentService(
+                $this->stripeService,
+                new \App\Models\Customer(),
+                $subscriptionModel,
+                new \App\Models\StripeEvent()
+            );
+
+            $stripeSubscription = $paymentService->resumeSubscription($subscription['stripe_subscription_id']);
+
+            // Atualiza no banco
+            $subscriptionModel->createOrUpdate($tenantId, $subscription['customer_id'], $stripeSubscription->toArray());
+
+            ResponseHelper::sendSuccess([
+                'subscription_id' => $id,
+                'status' => $stripeSubscription->status
+            ], 200, 'Assinatura retomada com sucesso');
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError($e, 'Erro ao retomar assinatura', 'SUBSCRIPTION_RESUME_ERROR', ['action' => 'resume_subscription', 'subscription_id' => $id, 'tenant_id' => $tenantId ?? null]);
         }
     }
 }

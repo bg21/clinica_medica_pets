@@ -99,6 +99,121 @@ class ReportService
     }
 
     /**
+     * Calcula receita por período para SaaS admin (todos os tenants)
+     * 
+     * @param array $period Período processado
+     * @return array Dados de receita
+     */
+    public function getRevenueForSaasAdmin(array $period): array
+    {
+        $cacheKey = 'report:revenue:saas:' . md5(json_encode($period));
+        
+        // Tenta obter do cache (TTL de 15 minutos)
+        $cached = CacheService::getJson($cacheKey);
+        if ($cached !== null) {
+            Logger::info("Receita SaaS obtida do cache", ['cache_key' => $cacheKey]);
+            return $cached;
+        }
+
+        try {
+            // Busca balance transactions do Stripe no período (conta principal)
+            $balanceTransactions = $this->stripeService->listBalanceTransactions([
+                'limit' => 100,
+                'created' => [
+                    'gte' => $period['start'],
+                    'lte' => $period['end']
+                ]
+            ]);
+
+            $totalRevenue = 0;
+            $revenueByPlan = [];
+            $revenueByCurrency = [];
+            $currency = 'BRL';
+
+            foreach ($balanceTransactions->data as $transaction) {
+                // Filtra apenas transações do tipo charge (receita)
+                if ($transaction->type === 'charge' && $transaction->status === 'available') {
+                    // Valor em centavos, converte para reais
+                    $amount = $transaction->net / 100;
+                    
+                    $totalRevenue += $amount;
+                    
+                    $txnCurrency = strtoupper($transaction->currency ?? 'brl');
+                    if (!isset($revenueByCurrency[$txnCurrency])) {
+                        $revenueByCurrency[$txnCurrency] = 0;
+                    }
+                    $revenueByCurrency[$txnCurrency] += $amount;
+                }
+            }
+
+            // Busca receita por plano das assinaturas do banco local (todos os tenants)
+            $db = Database::getInstance();
+            $stmt = $db->prepare("
+                SELECT 
+                    plan_id,
+                    plan_name,
+                    COUNT(*) as subscription_count,
+                    AVG(amount) as avg_amount,
+                    currency
+                FROM subscriptions
+                WHERE status = 'active'
+                    AND created_at <= :end
+                GROUP BY plan_id, plan_name, currency
+            ");
+
+            $stmt->execute([
+                ':end' => date('Y-m-d H:i:s', $period['end'])
+            ]);
+
+            $subscriptionPlans = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+
+            foreach ($subscriptionPlans as $row) {
+                $planId = $row['plan_id'] ?? 'unknown';
+                $planName = $row['plan_name'] ?? 'Plano sem nome';
+                $avgAmount = (float)$row['avg_amount'];
+                $subscriptionCount = (int)$row['subscription_count'];
+                
+                $revenueByPlan[$planId] = [
+                    'plan_id' => $planId,
+                    'plan_name' => $planName,
+                    'amount' => round($avgAmount * $subscriptionCount, 2),
+                    'subscriptions' => $subscriptionCount,
+                    'avg_amount' => round($avgAmount, 2),
+                    'currency' => strtoupper($row['currency'] ?? 'BRL')
+                ];
+            }
+
+            // Determina moeda principal (a com maior receita)
+            if (!empty($revenueByCurrency)) {
+                $currency = array_search(max($revenueByCurrency), $revenueByCurrency);
+            }
+
+            $result = [
+                'total' => round($totalRevenue, 2),
+                'currency' => $currency,
+                'by_plan' => array_values($revenueByPlan),
+                'by_currency' => $revenueByCurrency,
+                'period' => [
+                    'start' => $period['start_date'],
+                    'end' => $period['end_date'],
+                    'type' => $period['period_type']
+                ]
+            ];
+
+            // Salva no cache (15 minutos)
+            CacheService::setJson($cacheKey, $result, 900);
+
+            return $result;
+        } catch (\Exception $e) {
+            Logger::error("Erro ao calcular receita SaaS", [
+                'error' => $e->getMessage(),
+                'period' => $period
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
      * Calcula receita por período
      * 
      * @param int $tenantId ID do tenant
@@ -220,6 +335,102 @@ class ReportService
             Logger::error("Erro ao calcular receita", [
                 'error' => $e->getMessage(),
                 'tenant_id' => $tenantId,
+                'period' => $period
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Calcula estatísticas de assinaturas para SaaS admin (todos os tenants)
+     * 
+     * @param array $period Período processado
+     * @return array Estatísticas de assinaturas
+     */
+    public function getSubscriptionsStatsForSaasAdmin(array $period): array
+    {
+        $cacheKey = 'report:subscriptions:saas:' . md5(json_encode($period));
+        
+        $cached = CacheService::getJson($cacheKey);
+        if ($cached !== null) {
+            return $cached;
+        }
+
+        try {
+            $db = Database::getInstance();
+
+            // Total de assinaturas no período (todos os tenants)
+            $stmt = $db->prepare("
+                SELECT COUNT(*) as total
+                FROM subscriptions
+                WHERE created_at BETWEEN :start AND :end
+            ");
+            $stmt->execute([
+                ':start' => date('Y-m-d H:i:s', $period['start']),
+                ':end' => date('Y-m-d H:i:s', $period['end'])
+            ]);
+            $total = (int)$stmt->fetchColumn();
+
+            // Assinaturas ativas (todos os tenants)
+            $stmt = $db->prepare("
+                SELECT COUNT(*) as active
+                FROM subscriptions
+                WHERE status = 'active'
+                    AND (created_at BETWEEN :start AND :end OR updated_at BETWEEN :start2 AND :end2)
+            ");
+            $stmt->execute([
+                ':start' => date('Y-m-d H:i:s', $period['start']),
+                ':end' => date('Y-m-d H:i:s', $period['end']),
+                ':start2' => date('Y-m-d H:i:s', $period['start']),
+                ':end2' => date('Y-m-d H:i:s', $period['end'])
+            ]);
+            $active = (int)$stmt->fetchColumn();
+
+            // Assinaturas canceladas (todos os tenants)
+            $stmt = $db->prepare("
+                SELECT COUNT(*) as canceled
+                FROM subscriptions
+                WHERE status IN ('canceled', 'unpaid', 'past_due')
+                    AND updated_at BETWEEN :start AND :end
+            ");
+            $stmt->execute([
+                ':start' => date('Y-m-d H:i:s', $period['start']),
+                ':end' => date('Y-m-d H:i:s', $period['end'])
+            ]);
+            $canceled = (int)$stmt->fetchColumn();
+
+            // Assinaturas em trial (todos os tenants)
+            $stmt = $db->prepare("
+                SELECT COUNT(*) as trial
+                FROM subscriptions
+                WHERE status = 'trialing'
+                    AND (created_at BETWEEN :start AND :end OR updated_at BETWEEN :start2 AND :end2)
+            ");
+            $stmt->execute([
+                ':start' => date('Y-m-d H:i:s', $period['start']),
+                ':end' => date('Y-m-d H:i:s', $period['end']),
+                ':start2' => date('Y-m-d H:i:s', $period['start']),
+                ':end2' => date('Y-m-d H:i:s', $period['end'])
+            ]);
+            $trial = (int)$stmt->fetchColumn();
+
+            $result = [
+                'total' => $total,
+                'active' => $active,
+                'canceled' => $canceled,
+                'trial' => $trial,
+                'period' => [
+                    'start' => $period['start_date'],
+                    'end' => $period['end_date'],
+                    'type' => $period['period_type']
+                ]
+            ];
+
+            CacheService::setJson($cacheKey, $result, 900);
+            return $result;
+        } catch (\Exception $e) {
+            Logger::error("Erro ao calcular estatísticas de assinaturas SaaS", [
+                'error' => $e->getMessage(),
                 'period' => $period
             ]);
             throw $e;

@@ -634,6 +634,14 @@ async function loadCustomers() {
         const total = paginationMeta.total || customers.length;
         const totalPages = Math.ceil(total / pageSize);
         
+        // ✅ DEBUG: Log para verificar dados recebidos
+        console.log('Customers recebidos:', customers);
+        if (customers.length > 0) {
+            console.log('Primeiro customer (exemplo):', customers[0]);
+            console.log('Stripe ID do primeiro:', customers[0].stripe_customer_id || customers[0].id);
+            console.log('Assinaturas do primeiro:', customers[0].subscriptions_count);
+        }
+        
         renderCustomers();
         renderPagination(totalPages);
     } catch (error) {
@@ -729,7 +737,8 @@ function renderCustomers() {
     updateCustomerStats(stats);
     
     tbody.innerHTML = customers.map(customer => {
-        const name = customer.name || 'Sem nome';
+        // ✅ CORREÇÃO: Usa email como fallback quando name for null/vazio
+        const name = customer.name || customer.email || 'Cliente sem nome';
         const initial = name.charAt(0).toUpperCase();
         const subscriptionsCount = customer.subscriptions_count || 0;
         const hasSubscriptions = subscriptionsCount > 0;
@@ -746,7 +755,7 @@ function renderCustomers() {
                     </div>
                     <div>
                         <div class="fw-medium">${escapeHtml(name)}</div>
-                        <small class="text-muted">ID: ${customer.id}</small>
+                        <small class="text-muted">ID: ${customer.stripe_customer_id || customer.id}</small>
                     </div>
                 </div>
             </td>
@@ -757,8 +766,8 @@ function renderCustomers() {
                 </div>
             </td>
             <td>
-                ${customer.stripe_customer_id ? `
-                    <code class="text-muted small">${escapeHtml(customer.stripe_customer_id)}</code>
+                ${(customer.stripe_customer_id || customer.id) ? `
+                    <code class="text-muted small">${escapeHtml(customer.stripe_customer_id || customer.id)}</code>
                 ` : '<span class="text-muted">-</span>'}
             </td>
             <td>

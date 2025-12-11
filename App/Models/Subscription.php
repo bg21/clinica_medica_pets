@@ -238,6 +238,47 @@ class Subscription extends BaseModel
                 : $stripeData['trial_end'];
         }
 
+        // ✅ CORREÇÃO: Busca nome do produto (não do preço)
+        $planName = null;
+        $priceData = $stripeData['items']['data'][0]['price'] ?? null;
+        
+        if ($priceData) {
+            // Tenta obter do produto expandido (quando expand=items.data.price.product)
+            if (isset($priceData['product'])) {
+                $product = $priceData['product'];
+                
+                // Se produto foi expandido, vem como objeto/array com 'name'
+                if (is_array($product) || is_object($product)) {
+                    $productArray = is_object($product) ? (array)$product : $product;
+                    if (isset($productArray['name'])) {
+                        $planName = $productArray['name'];
+                    }
+                }
+            }
+            
+            // Fallback 1: Tenta nickname do preço
+            if (!$planName && isset($priceData['nickname'])) {
+                $planName = $priceData['nickname'];
+            }
+            
+            // Fallback 2: Se ainda não encontrou, tenta buscar do Stripe (se tiver product ID)
+            if (!$planName && isset($priceData['product']) && is_string($priceData['product'])) {
+                try {
+                    $stripeService = new \App\Services\StripeService();
+                    $product = $stripeService->getProduct($priceData['product']);
+                    if ($product && isset($product->name)) {
+                        $planName = $product->name;
+                    }
+                } catch (\Exception $e) {
+                    // Ignora erro, continua sem nome
+                    \App\Services\Logger::warning("Erro ao buscar nome do produto", [
+                        'product_id' => $priceData['product'],
+                        'error' => $e->getMessage()
+                    ]);
+                }
+            }
+        }
+        
         $subscriptionData = [
             'tenant_id' => $tenantId,
             'customer_id' => $customerId,
@@ -245,7 +286,7 @@ class Subscription extends BaseModel
             'stripe_customer_id' => $stripeData['customer'] ?? null,
             'status' => $stripeData['status'] ?? 'incomplete',
             'plan_id' => $stripeData['items']['data'][0]['price']['id'] ?? null,
-            'plan_name' => $stripeData['items']['data'][0]['price']['nickname'] ?? null,
+            'plan_name' => $planName,
             'amount' => ($stripeData['items']['data'][0]['price']['unit_amount'] ?? 0) / 100,
             'currency' => strtoupper($stripeData['currency'] ?? 'usd'),
             'current_period_start' => $currentPeriodStart,

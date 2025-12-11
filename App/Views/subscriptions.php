@@ -744,7 +744,9 @@ function escapeHtml(text) {
 }
 
 // Função auxiliar para formatar moeda (definida antes para uso em outras funções)
-function formatCurrency(amount, currency = 'BRL') {
+// ✅ CORREÇÃO: Renomeada para formatCurrencyReais para evitar conflito com formatCurrency global
+// do dashboard.js que divide por 100 (assume centavos). Esta função assume que o valor já está em reais.
+function formatCurrencyReais(amount, currency = 'BRL') {
     if (!amount && amount !== 0) return '-';
     
     const currencyMap = {
@@ -757,8 +759,9 @@ function formatCurrency(amount, currency = 'BRL') {
     const locale = currencyMap[currency?.toUpperCase()] || 'pt-BR';
     const currencyCode = currency?.toUpperCase() || 'BRL';
     
-    // Se o valor já estiver em centavos (maior que 1000), divide por 100
-    const finalAmount = amount > 1000 ? amount / 100 : amount;
+    // ✅ CORREÇÃO: O valor já vem em reais do backend (não centavos)
+    // Garante que é um número e não divide novamente
+    const finalAmount = parseFloat(amount);
     
     return new Intl.NumberFormat(locale, {
         style: 'currency',
@@ -787,7 +790,7 @@ function populatePriceSelect() {
     
     priceSelect.innerHTML = '<option value="">Selecione um preço...</option>' +
         recurringPrices.map(p => {
-            const amount = p.amount ? formatCurrency(p.amount, p.currency || 'brl') : '-';
+            const amount = p.amount ? formatCurrencyReais(p.amount, p.currency || 'brl') : '-';
             const interval = p.recurring?.interval === 'month' ? 'mês' : 
                                p.recurring?.interval === 'year' ? 'ano' : 
                                p.recurring?.interval || '';
@@ -843,6 +846,13 @@ async function loadSubscriptions() {
         subscriptions = response.data || [];
         paginationMeta = response.meta || {};
         
+        // ✅ DEBUG: Log para verificar dados recebidos
+        console.log('Assinaturas recebidas:', subscriptions);
+        if (subscriptions.length > 0) {
+            console.log('Primeira assinatura (exemplo):', subscriptions[0]);
+            console.log('Amount da primeira:', subscriptions[0].amount, 'Tipo:', typeof subscriptions[0].amount);
+        }
+        
         updateStats();
         renderSubscriptions();
         renderPagination();
@@ -894,7 +904,20 @@ function renderSubscriptions() {
     emptyState.style.display = 'none';
     
     tbody.innerHTML = subscriptions.map(sub => {
-        const customer = customers.find(c => c.id === sub.customer_id);
+        // ✅ CORREÇÃO: Para administradores SaaS, usa customer_name diretamente
+        // Para clínicas, busca no array customers
+        let customerName = null;
+        const customerId = sub.customer_id || sub.customer || null;
+        
+        if (sub.customer_name) {
+            // Administrador SaaS - usa nome direto do subscription
+            customerName = escapeHtml(sub.customer_name);
+        } else {
+            // Clínica - busca no array customers
+            const customer = customers.find(c => c.id === customerId);
+            customerName = customer ? escapeHtml(customer.name || customer.email) : (customerId ? `ID: ${customerId}` : 'Cliente não encontrado');
+        }
+        
         const statusBadge = {
             'active': 'bg-success',
             'canceled': 'bg-danger',
@@ -904,9 +927,8 @@ function renderSubscriptions() {
         }[sub.status] || 'bg-secondary';
         
         // Sanitiza dados para prevenir XSS
-        const customerName = customer ? escapeHtml(customer.name || customer.email) : `ID: ${sub.customer_id}`;
         const status = escapeHtml(sub.status);
-        const priceId = escapeHtml(sub.price_id || '-');
+        const planName = escapeHtml(sub.plan_name || sub.price_id || '-');
         
         const statusText = {
             'active': 'Ativa',
@@ -920,27 +942,30 @@ function renderSubscriptions() {
             <tr>
                 <td>
                     <div>
-                        <strong>#${sub.id}</strong>
-                        ${sub.stripe_subscription_id ? `
+                        <strong>#${sub.id || sub.stripe_subscription_id || '-'}</strong>
+                        ${sub.stripe_subscription_id && sub.stripe_subscription_id !== sub.id ? `
                             <br><small class="text-muted"><code>${escapeHtml(sub.stripe_subscription_id)}</code></small>
                         ` : ''}
                     </div>
                 </td>
                 <td>
                     <div>
-                        <div class="fw-medium">${customerName}</div>
-                        <small class="text-muted">ID: ${sub.customer_id}</small>
+                        <div class="fw-medium">${customerName || 'Cliente não encontrado'}</div>
+                        ${customerId ? `<small class="text-muted">ID: ${escapeHtml(customerId)}</small>` : ''}
                     </div>
                 </td>
                 <td>
                     <span class="badge ${statusBadge}">${statusText}</span>
                 </td>
                 <td>
-                    <code class="text-muted small">${priceId}</code>
+                    <div class="fw-medium">${planName}</div>
+                    ${sub.price_id && sub.price_id !== planName ? `
+                        <small class="text-muted"><code>${escapeHtml(sub.price_id)}</code></small>
+                    ` : ''}
                 </td>
                 <td>
                     <div class="fw-medium">
-                        ${sub.amount ? formatCurrency(sub.amount, sub.currency || 'BRL') : '-'}
+                        ${sub.amount !== undefined && sub.amount !== null ? formatCurrencyReais(parseFloat(sub.amount), sub.currency || 'BRL') : '-'}
                     </div>
                     ${sub.interval ? `
                         <small class="text-muted">/${sub.interval === 'month' ? 'mês' : sub.interval === 'year' ? 'ano' : sub.interval}</small>

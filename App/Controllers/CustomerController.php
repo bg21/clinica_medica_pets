@@ -105,6 +105,68 @@ class CustomerController
             PermissionHelper::require('view_customers');
             
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // Se for administrador SaaS, busca diretamente do Stripe (conta principal)
+            if ($isSaasAdmin && $tenantId === null) {
+                $queryParams = Flight::request()->query;
+                $limit = isset($queryParams['limit']) ? min(100, max(1, (int)$queryParams['limit'])) : 20;
+                $startingAfter = $queryParams['starting_after'] ?? null;
+                
+                $options = ['limit' => $limit];
+                if ($startingAfter) {
+                    $options['starting_after'] = $startingAfter;
+                }
+                
+                // Busca diretamente do Stripe usando conta principal
+                $customers = $this->stripeService->listCustomers($options);
+                
+                $customersData = [];
+                $stripeClient = $this->stripeService->getClient();
+                
+                foreach ($customers->data as $customer) {
+                    // Busca assinaturas do customer para contar
+                    $subscriptionsCount = 0;
+                    try {
+                        $subscriptions = $stripeClient->subscriptions->all([
+                            'customer' => $customer->id,
+                            'limit' => 100
+                        ]);
+                        $subscriptionsCount = count($subscriptions->data);
+                        
+                        Logger::debug("Assinaturas encontradas para customer", [
+                            'customer_id' => $customer->id,
+                            'subscriptions_count' => $subscriptionsCount
+                        ]);
+                    } catch (\Exception $e) {
+                        Logger::error("Erro ao buscar assinaturas do customer", [
+                            'customer_id' => $customer->id,
+                            'error' => $e->getMessage()
+                        ]);
+                    }
+                    
+                    // ✅ CORREÇÃO: Usa email como fallback quando name for null
+                    $customerName = $customer->name ?? $customer->email ?? 'Cliente sem nome';
+                    
+                    $customersData[] = [
+                        'id' => $customer->id, // ID do Stripe (cus_xxx) - usado como ID interno também
+                        'stripe_customer_id' => $customer->id, // ✅ CORREÇÃO: Garante que stripe_customer_id está definido
+                        'email' => $customer->email ?? '',
+                        'name' => $customerName,
+                        'description' => $customer->description ?? null,
+                        'subscriptions_count' => $subscriptionsCount,
+                        'created' => date('Y-m-d H:i:s', $customer->created),
+                        'created_at' => date('Y-m-d H:i:s', $customer->created), // ✅ CORREÇÃO: Adiciona created_at para compatibilidade
+                        'metadata' => (array)$customer->metadata
+                    ];
+                }
+                
+                ResponseHelper::sendSuccess($customersData, 200, null, [
+                    'has_more' => $customers->has_more,
+                    'total' => count($customersData)
+                ]);
+                return;
+            }
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_customers']);
@@ -189,6 +251,128 @@ class CustomerController
             PermissionHelper::require('view_customers');
             
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // Se for administrador SaaS, busca diretamente do Stripe (conta principal)
+            if ($isSaasAdmin && $tenantId === null) {
+                // Valida formato do ID (deve ser cus_xxx)
+                if (!preg_match('/^cus_[a-zA-Z0-9]+$/', $id)) {
+                    ResponseHelper::sendNotFoundError('Cliente', ['action' => 'get_customer', 'customer_id' => $id]);
+                    return;
+                }
+                
+                try {
+                    // Busca diretamente do Stripe usando conta principal
+                    $stripeCustomer = $this->stripeService->getCustomer($id);
+                } catch (\Stripe\Exception\InvalidRequestException $e) {
+                    if ($e->getStripeCode() === 'resource_missing') {
+                        ResponseHelper::sendNotFoundError('Cliente', ['action' => 'get_customer', 'customer_id' => $id]);
+                        return;
+                    }
+                    throw $e;
+                }
+                
+                // Busca assinaturas do customer
+                $stripeClient = $this->stripeService->getClient();
+                $subscriptions = [];
+                $subscriptionsCount = 0;
+                try {
+                    $subscriptionsList = $stripeClient->subscriptions->all([
+                        'customer' => $id,
+                        'limit' => 100,
+                        'expand' => ['data.default_payment_method', 'data.items.data.price.product']
+                    ]);
+                    $subscriptionsCount = count($subscriptionsList->data);
+                    
+                    foreach ($subscriptionsList->data as $sub) {
+                        $productName = 'Produto não encontrado';
+                        if (isset($sub->items->data[0]->price->product)) {
+                            $product = $sub->items->data[0]->price->product;
+                            if (is_object($product) && isset($product->name)) {
+                                $productName = $product->name;
+                            } elseif (is_string($product)) {
+                                try {
+                                    $productObj = $this->stripeService->getProduct($product);
+                                    $productName = $productObj->name ?? $productName;
+                                } catch (\Exception $e) {
+                                    // Ignora erro
+                                }
+                            }
+                        }
+                        
+                        $subscriptions[] = [
+                            'id' => $sub->id,
+                            'status' => $sub->status,
+                            'plan_name' => $productName,
+                            'price_id' => $sub->items->data[0]->price->id ?? null,
+                            'amount' => (float)($sub->items->data[0]->price->unit_amount / 100),
+                            'currency' => strtoupper($sub->currency ?? $sub->items->data[0]->price->currency),
+                            'interval' => $sub->items->data[0]->price->recurring->interval ?? null,
+                            'current_period_start' => date('Y-m-d H:i:s', $sub->current_period_start),
+                            'current_period_end' => date('Y-m-d H:i:s', $sub->current_period_end),
+                            'cancel_at_period_end' => $sub->cancel_at_period_end ?? false
+                        ];
+                    }
+                } catch (\Exception $e) {
+                    Logger::warning("Erro ao buscar assinaturas do customer", [
+                        'customer_id' => $id,
+                        'error' => $e->getMessage()
+                    ]);
+                }
+                
+                // Busca payment methods
+                $paymentMethods = [];
+                try {
+                    $paymentMethodsList = $stripeClient->paymentMethods->all([
+                        'customer' => $id,
+                        'type' => 'card'
+                    ]);
+                    
+                    foreach ($paymentMethodsList->data as $pm) {
+                        $paymentMethods[] = [
+                            'id' => $pm->id,
+                            'type' => $pm->type,
+                            'card' => [
+                                'brand' => $pm->card->brand ?? null,
+                                'last4' => $pm->card->last4 ?? null,
+                                'exp_month' => $pm->card->exp_month ?? null,
+                                'exp_year' => $pm->card->exp_year ?? null
+                            ]
+                        ];
+                    }
+                } catch (\Exception $e) {
+                    Logger::warning("Erro ao buscar payment methods do customer", [
+                        'customer_id' => $id,
+                        'error' => $e->getMessage()
+                    ]);
+                }
+                
+                // Formata resposta
+                $responseData = [
+                    'id' => $stripeCustomer->id,
+                    'stripe_customer_id' => $stripeCustomer->id,
+                    'email' => $stripeCustomer->email ?? null,
+                    'name' => $stripeCustomer->name ?? $stripeCustomer->email ?? 'Cliente sem nome',
+                    'phone' => $stripeCustomer->phone ?? null,
+                    'description' => $stripeCustomer->description ?? null,
+                    'metadata' => (array)$stripeCustomer->metadata,
+                    'created' => date('Y-m-d H:i:s', $stripeCustomer->created),
+                    'subscriptions_count' => $subscriptionsCount,
+                    'subscriptions' => $subscriptions,
+                    'payment_methods' => $paymentMethods,
+                    'address' => $stripeCustomer->address ? [
+                        'line1' => $stripeCustomer->address->line1 ?? null,
+                        'line2' => $stripeCustomer->address->line2 ?? null,
+                        'city' => $stripeCustomer->address->city ?? null,
+                        'state' => $stripeCustomer->address->state ?? null,
+                        'postal_code' => $stripeCustomer->address->postal_code ?? null,
+                        'country' => $stripeCustomer->address->country ?? null
+                    ] : null
+                ];
+                
+                ResponseHelper::sendSuccess($responseData);
+                return;
+            }
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_customer', 'customer_id' => $id]);
@@ -198,7 +382,16 @@ class CustomerController
             $customerModel = new \App\Models\Customer();
             
             // Buscar diretamente com filtro de tenant (mais seguro - proteção IDOR)
-            $customer = $customerModel->findByTenantAndId($tenantId, (int)$id);
+            // ✅ CORREÇÃO: Se o ID é um Stripe ID (cus_xxx), busca pelo stripe_customer_id
+            if (preg_match('/^cus_[a-zA-Z0-9]+$/', $id)) {
+                // Busca pelo Stripe ID e verifica se pertence ao tenant
+                $customer = $customerModel->findByStripeId($id);
+                if ($customer && (int)$customer['tenant_id'] !== (int)$tenantId) {
+                    $customer = null; // Não pertence ao tenant
+                }
+            } else {
+                $customer = $customerModel->findByTenantAndId($tenantId, (int)$id);
+            }
 
             if (!$customer) {
                 error_log("Cliente não encontrado no banco: customer_id={$id}, tenant_id={$tenantId}");
@@ -467,6 +660,47 @@ class CustomerController
             PermissionHelper::require('view_customers');
             
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // Se for administrador SaaS, busca diretamente do Stripe usando customer ID
+            if ($isSaasAdmin && $tenantId === null) {
+                $queryParams = Flight::request()->query;
+                $limit = isset($queryParams['limit']) ? min(100, max(1, (int)$queryParams['limit'])) : 10;
+                $startingAfter = $queryParams['starting_after'] ?? null;
+                
+                $options = ['limit' => $limit];
+                if ($startingAfter) {
+                    $options['starting_after'] = $startingAfter;
+                }
+                if (!empty($queryParams['status'])) {
+                    $options['status'] = $queryParams['status'];
+                }
+                
+                // Busca diretamente do Stripe usando conta principal
+                $invoices = $this->stripeService->listInvoices($id, $options);
+                
+                $invoicesData = [];
+                foreach ($invoices->data as $invoice) {
+                    $invoicesData[] = [
+                        'id' => $invoice->id,
+                        'customer' => $invoice->customer,
+                        'amount_paid' => $invoice->amount_paid / 100,
+                        'amount_due' => $invoice->amount_due / 100,
+                        'currency' => strtoupper($invoice->currency),
+                        'status' => $invoice->status,
+                        'paid' => $invoice->paid,
+                        'invoice_pdf' => $invoice->invoice_pdf,
+                        'hosted_invoice_url' => $invoice->hosted_invoice_url,
+                        'created' => date('Y-m-d H:i:s', $invoice->created)
+                    ];
+                }
+                
+                ResponseHelper::sendSuccess($invoicesData, 200, null, [
+                    'has_more' => $invoices->has_more,
+                    'total' => count($invoicesData)
+                ]);
+                return;
+            }
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_customer', 'customer_id' => $id]);
@@ -645,23 +879,58 @@ class CustomerController
     public function listPaymentMethods(string $id): void
     {
         try {
-            // Verifica permissão (só verifica se for autenticação de usuário)
+            // Verifica permissão (PermissionHelper já trata SaaS admins automaticamente)
             PermissionHelper::require('view_customers');
             
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_customer', 'customer_id' => $id]);
-                return;
-            }
-
-            $customerModel = new \App\Models\Customer();
+            // ✅ CORREÇÃO: Determina qual StripeService usar e qual customer ID usar
+            $stripeCustomerId = null;
+            $stripeService = null;
             
-            // Buscar diretamente com filtro de tenant (mais seguro - proteção IDOR)
-            $customer = $customerModel->findByTenantAndId($tenantId, (int)$id);
+            // Se for administrador SaaS, usa customer ID diretamente (Stripe ID cus_xxx)
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeCustomerId = $id; // ID já é o Stripe ID (cus_xxx)
+                $stripeService = $this->stripeService; // Conta principal
+            } 
+            // Se for clínica, busca no banco e valida tenant
+            elseif ($tenantId !== null) {
+                $customerModel = new \App\Models\Customer();
+                
+                // ✅ CORREÇÃO: Verifica se o ID é um Stripe ID (cus_xxx) ou ID numérico do banco
+                $isStripeId = strpos($id, 'cus_') === 0;
+                
+                if ($isStripeId) {
+                    // Busca pelo stripe_customer_id
+                    $customer = $customerModel->findByTenantAndStripeId($tenantId, $id);
+                } else {
+                    // Busca pelo ID numérico do banco
+                    $customer = $customerModel->findByTenantAndId($tenantId, (int)$id);
+                }
 
-            if (!$customer) {
-                ResponseHelper::sendNotFoundError('Cliente', ['action' => 'list_payment_methods', 'customer_id' => $id, 'tenant_id' => $tenantId]);
+                if (!$customer) {
+                    ResponseHelper::sendNotFoundError('Cliente', ['action' => 'list_payment_methods', 'customer_id' => $id, 'tenant_id' => $tenantId]);
+                    return;
+                }
+                
+                if (empty($customer['stripe_customer_id'])) {
+                    error_log("Cliente sem stripe_customer_id: {$id} (tenant_id: {$tenantId})");
+                    Flight::json([
+                        'success' => true,
+                        'data' => [],
+                        'meta' => [
+                            'count' => 0,
+                            'has_more' => false
+                        ]
+                    ]);
+                    return;
+                }
+                
+                $stripeCustomerId = $customer['stripe_customer_id'];
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_payment_methods', 'customer_id' => $id]);
                 return;
             }
 
@@ -689,9 +958,9 @@ class CustomerController
 
             // ✅ CACHE: Gera chave única baseada em parâmetros
             $cacheKey = sprintf(
-                'customers:payment-methods:%d:%d:%s:%s:%s',
-                $tenantId,
-                (int)$id,
+                'customers:payment-methods:%s:%s:%s:%s:%s',
+                $isSaasAdmin ? 'saas' : (string)$tenantId,
+                $stripeCustomerId,
                 $type ?? '',
                 $startingAfter ?? '',
                 $endingBefore ?? ''
@@ -718,26 +987,12 @@ class CustomerController
                 return;
             }
 
-            // ✅ CORREÇÃO: Valida se tem stripe_customer_id
-            if (empty($customer['stripe_customer_id'])) {
-                error_log("Cliente sem stripe_customer_id: {$id} (tenant_id: {$tenantId})");
-                Flight::json([
-                    'success' => true,
-                    'data' => [],
-                    'meta' => [
-                        'count' => 0,
-                        'has_more' => false
-                    ]
-                ]);
-                return;
-            }
-
             // Lista métodos de pagamento do Stripe
             try {
-                $paymentMethods = $this->stripeService->listPaymentMethods($customer['stripe_customer_id'], $options);
+                $paymentMethods = $stripeService->listPaymentMethods($stripeCustomerId, $options);
             } catch (\Stripe\Exception\InvalidRequestException $e) {
                 // Se o customer não existe no Stripe ou não tem métodos de pagamento, retorna array vazio
-                error_log("Erro ao listar métodos de pagamento do Stripe: {$e->getMessage()} (customer_id: {$id}, stripe_customer_id: {$customer['stripe_customer_id']})");
+                error_log("Erro ao listar métodos de pagamento do Stripe: {$e->getMessage()} (customer_id: {$id}, stripe_customer_id: {$stripeCustomerId})");
                 Flight::json([
                     'success' => true,
                     'data' => [],
@@ -1026,6 +1281,44 @@ class CustomerController
             ResponseHelper::sendStripeError($e, 'Erro ao definir método de pagamento como padrão', ['action' => 'set_default_payment_method', 'customer_id' => $id, 'payment_method_id' => $pmId, 'tenant_id' => $tenantId]);
         } catch (\Exception $e) {
             ResponseHelper::sendGenericError($e, 'Erro ao definir método de pagamento como padrão', 'PAYMENT_METHOD_SET_DEFAULT_ERROR', ['action' => 'set_default_payment_method', 'customer_id' => $id, 'payment_method_id' => $pmId, 'tenant_id' => $tenantId]);
+        }
+    }
+
+    /**
+     * Remove métodos de pagamento expirados de um customer
+     * POST /v1/customers/:id/payment-methods/remove-expired
+     */
+    public function removeExpiredPaymentMethods(string $id): void
+    {
+        try {
+            PermissionHelper::require('update_customers');
+            
+            $tenantId = Flight::get('tenant_id');
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'remove_expired_payment_methods', 'customer_id' => $id]);
+                return;
+            }
+
+            $customerModel = new \App\Models\Customer();
+            $customer = $customerModel->findById((int)$id);
+
+            if (!$customer || $customer['tenant_id'] != $tenantId) {
+                ResponseHelper::sendNotFoundError('Cliente', ['action' => 'remove_expired_payment_methods', 'customer_id' => $id, 'tenant_id' => $tenantId]);
+                return;
+            }
+
+            $paymentService = new \App\Services\PaymentService(
+                $this->stripeService,
+                $customerModel,
+                new \App\Models\Subscription(),
+                new \App\Models\StripeEvent()
+            );
+
+            $result = $paymentService->removeExpiredPaymentMethods($customer['stripe_customer_id']);
+
+            ResponseHelper::sendSuccess($result, 200, "Removidos {$result['removed_count']} método(s) de pagamento expirado(s)");
+        } catch (\Exception $e) {
+            ResponseHelper::sendGenericError($e, 'Erro ao remover métodos de pagamento expirados', 'PAYMENT_METHODS_REMOVE_EXPIRED_ERROR', ['action' => 'remove_expired_payment_methods', 'customer_id' => $id, 'tenant_id' => $tenantId ?? null]);
         }
     }
 }

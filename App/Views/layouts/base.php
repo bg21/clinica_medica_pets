@@ -10,7 +10,10 @@
  */
 
 // Define se deve mostrar seções do SaaS (Stripe)
-$showSaaSFeatures = ($user['role'] ?? '') === 'admin';
+// Administradores SaaS e admins de clínica veem os menus
+$showSaaSFeatures = ($user['role'] ?? '') === 'admin' || ($user['is_saas_admin'] ?? false);
+// Administradores SaaS veem todos os menus
+$isSaasAdmin = ($user['is_saas_admin'] ?? false);
 ?>
 <!DOCTYPE html>
 <html lang="pt-BR">
@@ -216,6 +219,48 @@ $showSaaSFeatures = ($user['role'] ?? '') === 'admin';
                                 <span>Relatórios</span>
                             </a>
                         </li>
+                        <li class="nav-item">
+                            <a href="/stripe-metrics" class="nav-link <?php echo ($currentPage ?? '') === 'stripe-metrics' ? 'active' : ''; ?>">
+                                <i class="bi bi-graph-up-arrow"></i>
+                                <span>Métricas Stripe</span>
+                            </a>
+                        </li>
+                    </ul>
+                </li>
+                <?php endif; ?>
+                <li class="nav-section">
+                    <span class="nav-section-title">Minha Conta</span>
+                    <ul class="nav-menu">
+                        <li class="nav-item">
+                            <a href="/my-subscription" class="nav-link <?php echo ($currentPage ?? '') === 'my-subscription' ? 'active' : ''; ?>">
+                                <i class="bi bi-credit-card"></i>
+                                <span>Minha Assinatura</span>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a href="/my-modules" class="nav-link <?php echo ($currentPage ?? '') === 'my-modules' ? 'active' : ''; ?>">
+                                <i class="bi bi-puzzle"></i>
+                                <span>Meus Módulos</span>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a href="/settings" class="nav-link <?php echo ($currentPage ?? '') === 'settings' ? 'active' : ''; ?>">
+                                <i class="bi bi-gear"></i>
+                                <span>Configurações</span>
+                            </a>
+                        </li>
+                    </ul>
+                </li>
+                <?php if (($user['is_saas_admin'] ?? false)): ?>
+                <li class="nav-section">
+                    <span class="nav-section-title">Administração SaaS</span>
+                    <ul class="nav-menu">
+                        <li class="nav-item">
+                            <a href="/admin-plans" class="nav-link <?php echo ($currentPage ?? '') === 'admin-plans' ? 'active' : ''; ?>">
+                                <i class="bi bi-grid-3x3-gap"></i>
+                                <span>Planos e Módulos</span>
+                            </a>
+                        </li>
                     </ul>
                 </li>
                 <?php endif; ?>
@@ -395,10 +440,33 @@ $showSaaSFeatures = ($user['role'] ?? '') === 'admin';
     
     <!-- ✅ OTIMIZAÇÃO: Variáveis globais inline (necessárias antes do script externo) -->
     <script>
-        const API_URL = <?php echo json_encode($apiUrl ?? '', JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
-        const SESSION_ID = localStorage.getItem('session_id');
-        const USER = <?php echo json_encode($user ?? null, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
-        const TENANT = <?php echo json_encode($tenant ?? null, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+        // Protege contra redeclaração (caso scripts sejam carregados múltiplas vezes)
+        if (typeof window.API_URL === 'undefined') {
+            window.API_URL = <?php echo json_encode($apiUrl ?? '', JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+        }
+        if (typeof window.SESSION_ID === 'undefined') {
+            // Verifica se é administrador SaaS primeiro, depois usuário normal
+            window.SESSION_ID = localStorage.getItem('saas_admin_session_id') || localStorage.getItem('session_id');
+        }
+        if (typeof window.USER === 'undefined') {
+            window.USER = <?php echo json_encode($user ?? null, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+        }
+        if (typeof window.TENANT === 'undefined') {
+            window.TENANT = <?php echo json_encode($tenant ?? null, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>;
+        }
+        // Cria aliases para compatibilidade (caso código use sem window.)
+        if (typeof API_URL === 'undefined') {
+            var API_URL = window.API_URL;
+        }
+        if (typeof SESSION_ID === 'undefined') {
+            var SESSION_ID = window.SESSION_ID;
+        }
+        if (typeof USER === 'undefined') {
+            var USER = window.USER;
+        }
+        if (typeof TENANT === 'undefined') {
+            var TENANT = window.TENANT;
+        }
     </script>
     
     <!-- ✅ OTIMIZAÇÃO: JavaScript principal em arquivo externo (permite cache do navegador) -->

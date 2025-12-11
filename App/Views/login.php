@@ -125,6 +125,11 @@
         <div class="login-header">
             <h1><i class="bi bi-shield-lock-fill text-primary"></i> Login</h1>
             <p>Entre com suas credenciais para acessar o sistema</p>
+            <div style="margin-top: 15px;">
+                <a href="/saas-admin/login" style="color: #667eea; text-decoration: none; font-size: 14px;">
+                    <i class="bi bi-shield-lock"></i> Sou administrador do SaaS
+                </a>
+            </div>
         </div>
 
         <div id="errorAlert" class="alert alert-danger d-none" role="alert">

@@ -41,8 +41,14 @@ class CouponController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_coupon']);
                 return;
             }
@@ -74,13 +80,15 @@ class CouponController
                 return;
             }
 
-            // Adiciona tenant_id aos metadados se não existir
-            if (!isset($data['metadata'])) {
-                $data['metadata'] = [];
+            // Adiciona tenant_id aos metadados se não existir (apenas para clínicas)
+            if (!$isSaasAdmin && $tenantId !== null) {
+                if (!isset($data['metadata'])) {
+                    $data['metadata'] = [];
+                }
+                $data['metadata']['tenant_id'] = $tenantId;
             }
-            $data['metadata']['tenant_id'] = $tenantId;
 
-            $coupon = $this->stripeService->createCoupon($data);
+            $coupon = $stripeService->createCoupon($data);
 
             ResponseHelper::sendCreated([
                 'id' => $coupon->id,
@@ -119,9 +127,15 @@ class CouponController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_coupon']);
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_coupons']);
                 return;
             }
 
@@ -150,11 +164,19 @@ class CouponController
                 $options['ending_before'] = $queryParams['ending_before'];
             }
             
-            $coupons = $this->stripeService->listCoupons($options);
+            $coupons = $stripeService->listCoupons($options);
             
             // Formata resposta
             $formattedCoupons = [];
             foreach ($coupons->data as $coupon) {
+                // ✅ CORREÇÃO: Filtra apenas cupons do tenant (via metadata) - apenas para clínicas
+                if (!$isSaasAdmin && $tenantId !== null) {
+                    if (isset($coupon->metadata->tenant_id) && 
+                        (string)$coupon->metadata->tenant_id !== (string)$tenantId) {
+                        continue; // Pula cupons de outros tenants
+                    }
+                }
+                
                 $formattedCoupons[] = [
                     'id' => $coupon->id,
                     'name' => $coupon->name,
@@ -205,13 +227,28 @@ class CouponController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_coupon']);
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_coupon']);
                 return;
             }
 
-            $coupon = $this->stripeService->getCoupon($id);
+            $coupon = $stripeService->getCoupon($id);
+            
+            // ✅ CORREÇÃO: Valida se pertence ao tenant (via metadata) - apenas para clínicas
+            if (!$isSaasAdmin && $tenantId !== null) {
+                if (isset($coupon->metadata->tenant_id) && 
+                    (string)$coupon->metadata->tenant_id !== (string)$tenantId) {
+                    ResponseHelper::sendNotFoundError('Cupom', ['action' => 'get_coupon', 'coupon_id' => $id, 'tenant_id' => $tenantId]);
+                    return;
+                }
+            }
 
             ResponseHelper::sendSuccess([
                 'id' => $coupon->id,
@@ -263,14 +300,29 @@ class CouponController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_coupon']);
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'update_coupon']);
                 return;
             }
 
             // Primeiro, verifica se o cupom existe
-            $coupon = $this->stripeService->getCoupon($id);
+            $coupon = $stripeService->getCoupon($id);
+            
+            // ✅ CORREÇÃO: Valida se pertence ao tenant (via metadata) - apenas para clínicas
+            if (!$isSaasAdmin && $tenantId !== null) {
+                if (isset($coupon->metadata->tenant_id) && 
+                    (string)$coupon->metadata->tenant_id !== (string)$tenantId) {
+                    ResponseHelper::sendNotFoundError('Cupom', ['action' => 'update_coupon', 'coupon_id' => $id, 'tenant_id' => $tenantId]);
+                    return;
+                }
+            }
 
             // ✅ OTIMIZAÇÃO: Usa RequestCache para evitar múltiplas leituras
             $data = \App\Utils\RequestCache::getJsonInput();
@@ -284,12 +336,12 @@ class CouponController
                 $data = [];
             }
 
-            // Preserva tenant_id nos metadados se metadata for atualizado
-            if (isset($data['metadata'])) {
+            // Preserva tenant_id nos metadados se metadata for atualizado (apenas para clínicas)
+            if (!$isSaasAdmin && $tenantId !== null && isset($data['metadata'])) {
                 $data['metadata']['tenant_id'] = $tenantId;
             }
 
-            $coupon = $this->stripeService->updateCoupon($id, $data);
+            $coupon = $stripeService->updateCoupon($id, $data);
 
             ResponseHelper::sendSuccess([
                 'id' => $coupon->id,
@@ -340,13 +392,31 @@ class CouponController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_coupon']);
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'delete_coupon']);
                 return;
             }
+            
+            // Primeiro, verifica se o cupom existe e pertence ao tenant
+            $coupon = $stripeService->getCoupon($id);
+            
+            // ✅ CORREÇÃO: Valida se pertence ao tenant (via metadata) - apenas para clínicas
+            if (!$isSaasAdmin && $tenantId !== null) {
+                if (isset($coupon->metadata->tenant_id) && 
+                    (string)$coupon->metadata->tenant_id !== (string)$tenantId) {
+                    ResponseHelper::sendNotFoundError('Cupom', ['action' => 'delete_coupon', 'coupon_id' => $id, 'tenant_id' => $tenantId]);
+                    return;
+                }
+            }
 
-            $coupon = $this->stripeService->deleteCoupon($id);
+            $coupon = $stripeService->deleteCoupon($id);
 
             ResponseHelper::sendSuccess([
                 'id' => $coupon->id,

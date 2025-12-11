@@ -303,6 +303,32 @@
 let prices = [];
 let products = [];
 
+// Função auxiliar para formatar moeda em reais (não divide por 100)
+// ✅ CORREÇÃO: Renomeada para evitar conflito com formatCurrency global do dashboard.js
+// que divide por 100 (assume centavos). Esta função assume que o valor já está em reais.
+function formatCurrencyReais(amount, currency = 'BRL') {
+    if (!amount && amount !== 0) return '-';
+    
+    const currencyMap = {
+        'BRL': 'pt-BR',
+        'USD': 'en-US',
+        'EUR': 'de-DE',
+        'GBP': 'en-GB'
+    };
+    
+    const locale = currencyMap[currency?.toUpperCase()] || 'pt-BR';
+    const currencyCode = currency?.toUpperCase() || 'BRL';
+    
+    // ✅ CORREÇÃO: O valor já vem em reais do backend (não centavos)
+    // Garante que é um número e não divide novamente
+    const finalAmount = parseFloat(amount);
+    
+    return new Intl.NumberFormat(locale, {
+        style: 'currency',
+        currency: currencyCode
+    }).format(finalAmount);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     // Carrega dados após um pequeno delay para não bloquear a renderização
     setTimeout(() => {
@@ -547,6 +573,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 showAlert('Preço criado com sucesso!', 'success');
                 bootstrap.Modal.getInstance(document.getElementById('createPriceModal')).hide();
                 
+                // ✅ CORREÇÃO: Marca que preço foi criado para forçar refresh na listagem
+                sessionStorage.setItem('priceJustCreated', 'true');
+                
                 // Reset já é feito pelo evento hidden.bs.modal
                 loadPrices();
             } catch (error) {
@@ -606,12 +635,29 @@ async function loadPrices() {
         const typeFilter = document.getElementById('typeFilter')?.value;
         const currencyFilter = document.getElementById('currencyFilter')?.value;
         
-        if (statusFilter) params.append('active', statusFilter);
+        // ✅ CORREÇÃO: Por padrão, mostra apenas prices ativos (consistência com produtos)
+        if (statusFilter) {
+            params.append('active', statusFilter);
+        } else {
+            // Padrão: mostrar apenas prices ativos
+            params.append('active', 'true');
+        }
+        
         if (typeFilter) params.append('type', typeFilter);
         if (currencyFilter) params.append('currency', currencyFilter);
         
+        // ✅ CORREÇÃO: Adiciona parâmetro refresh para forçar atualização após criar preço
+        // Se acabou de criar um preço, força refresh
+        const justCreated = sessionStorage.getItem('priceJustCreated') === 'true';
+        if (justCreated) {
+            params.append('refresh', 'true');
+            sessionStorage.removeItem('priceJustCreated');
+        }
+        
         const url = '/v1/prices' + (params.toString() ? '?' + params.toString() : '');
-        const response = await apiRequest(url);
+        const response = await apiRequest(url, {
+            cacheTTL: justCreated ? 0 : 15000 // Sem cache se acabou de criar
+        });
         prices = response.data?.prices || response.data || [];
         
         renderPrices();
@@ -700,7 +746,7 @@ function renderPrices() {
                     ${productId && productId !== 'N/A' ? `<small class="text-muted">ID: ${productId}</small>` : ''}
                 </td>
                 <td>
-                    <div class="fw-bold">${formatCurrency(price.unit_amount, price.currency)}</div>
+                    <div class="fw-bold">${formatCurrencyReais(price.unit_amount, price.currency)}</div>
                     <small class="text-muted">${price.currency?.toUpperCase() || ''}</small>
                 </td>
                 <td>
@@ -724,7 +770,10 @@ function renderPrices() {
                         <a href="/price-details?id=${price.id}" class="btn btn-sm btn-outline-primary" title="Ver detalhes">
                             <i class="bi bi-eye"></i>
                         </a>
-                        <button type="button" class="btn btn-sm btn-outline-danger" onclick="deletePrice('${price.id}')" title="Excluir">
+                        <a href="/price-details?id=${price.id}" class="btn btn-sm btn-outline-warning" title="Editar">
+                            <i class="bi bi-pencil"></i>
+                        </a>
+                        <button type="button" class="btn btn-sm btn-outline-danger" onclick="deletePrice('${price.id}')" title="Desativar">
                             <i class="bi bi-trash"></i>
                         </button>
                     </div>
@@ -762,6 +811,32 @@ function formatNumber(num) {
     return new Intl.NumberFormat('pt-BR').format(num);
 }
 
+// ✅ CORREÇÃO: Renomeada para formatCurrencyReais para evitar conflito com formatCurrency global
+// do dashboard.js que divide por 100 (assume centavos). Esta função assume que o valor já está em reais.
+function formatCurrencyReais(amount, currency = 'BRL') {
+    if (!amount && amount !== 0) return '-';
+    
+    const currencyMap = {
+        'BRL': 'pt-BR',
+        'USD': 'en-US',
+        'EUR': 'de-DE',
+        'GBP': 'en-GB'
+    };
+    
+    const locale = currencyMap[currency?.toUpperCase()] || 'pt-BR';
+    const currencyCode = currency?.toUpperCase() || 'BRL';
+    
+    // ✅ CORREÇÃO: O valor já vem em reais do backend (não centavos)
+    // Garante que é um número e não divide novamente
+    const finalAmount = parseFloat(amount);
+    
+    return new Intl.NumberFormat(locale, {
+        style: 'currency',
+        currency: currencyCode
+    }).format(finalAmount);
+}
+
+// Função local para preview (assume centavos, pois vem do input)
 function formatCurrency(amount, currency = 'BRL') {
     if (!amount && amount !== 0) return '-';
     
@@ -801,6 +876,9 @@ async function deletePrice(priceId) {
         if (typeof cache !== 'undefined' && cache.clear) {
             cache.clear('/v1/prices');
         }
+        
+        // ✅ CORREÇÃO: Marca que preço foi deletado para forçar refresh na listagem
+        sessionStorage.setItem('priceJustCreated', 'true');
         
         showAlert('Preço desativado com sucesso!', 'success');
         

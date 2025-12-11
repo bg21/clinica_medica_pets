@@ -285,12 +285,26 @@ function loadProductForEdit() {
         document.getElementById('editProductImages').value = '';
     }
     
-    if (productData.metadata) {
-        document.getElementById('editProductMetadata').value = 
-            JSON.stringify(productData.metadata, null, 2);
+    // ✅ CORREÇÃO: Preenche metadata de forma segura
+    const metadataEl = document.getElementById('editProductMetadata');
+    if (productData.metadata && typeof productData.metadata === 'object' && productData.metadata !== null) {
+        try {
+            // Garante que é um objeto (não array)
+            if (!Array.isArray(productData.metadata)) {
+                metadataEl.value = JSON.stringify(productData.metadata, null, 2);
+            } else {
+                console.warn('Metadata é um array, convertendo para objeto vazio');
+                metadataEl.value = '{}';
+            }
+        } catch (error) {
+            console.warn('Erro ao serializar metadata:', error);
+            metadataEl.value = '';
+        }
     } else {
-        document.getElementById('editProductMetadata').value = '';
+        metadataEl.value = '';
     }
+    // Remove classe de erro se existir
+    metadataEl.classList.remove('is-invalid');
 }
 
 // Submissão do formulário de edição
@@ -336,11 +350,23 @@ document.getElementById('editProductForm').addEventListener('submit', function(e
     const metadataText = document.getElementById('editProductMetadata').value.trim();
     if (metadataText) {
         try {
-            formData.metadata = JSON.parse(metadataText);
+            const parsed = JSON.parse(metadataText);
+            // ✅ CORREÇÃO: Valida se o resultado é um objeto (não array ou primitivo)
+            if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+                formData.metadata = parsed;
+            } else {
+                showAlert('Erro: Metadados devem ser um objeto JSON válido (ex: {"chave": "valor"})', 'danger');
+                document.getElementById('editProductMetadata').classList.add('is-invalid');
+                return;
+            }
         } catch (error) {
-            showAlert('Erro: Metadados devem estar em formato JSON válido', 'danger');
+            showAlert('Erro: Metadados devem estar em formato JSON válido. Exemplo: {"chave": "valor"}', 'danger');
+            document.getElementById('editProductMetadata').classList.add('is-invalid');
             return;
         }
+    } else {
+        // ✅ CORREÇÃO: Se metadata estiver vazio, não envia o campo (mantém metadata existente)
+        // Ou pode enviar null para limpar, mas vamos manter o existente se não for especificado
     }
 
     const submitBtn = this.querySelector('button[type="submit"]');

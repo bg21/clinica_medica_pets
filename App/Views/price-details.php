@@ -153,15 +153,68 @@ async function loadPriceDetails() {
     }
 }
 
+// ✅ CORREÇÃO: Função local para formatar moeda sem dividir por 100 (valor já vem em reais)
+function formatCurrencyReais(value, currency = 'BRL') {
+    if (!value && value !== 0) return '-';
+    
+    const currencyMap = {
+        'BRL': 'pt-BR',
+        'USD': 'en-US',
+        'EUR': 'de-DE',
+        'GBP': 'en-GB'
+    };
+    
+    const locale = currencyMap[currency?.toUpperCase()] || 'pt-BR';
+    const currencyCode = currency?.toUpperCase() || 'BRL';
+    
+    // ✅ CORREÇÃO: O valor já vem em reais do backend (não divide por 100)
+    const finalAmount = parseFloat(value);
+    
+    return new Intl.NumberFormat(locale, {
+        style: 'currency',
+        currency: currencyCode
+    }).format(finalAmount);
+}
+
 function renderPriceInfo(price) {
     const interval = price.recurring ? `${price.recurring.interval}${price.recurring.interval_count > 1 ? ` (a cada ${price.recurring.interval_count})` : ''}` : 'one-time';
+    
+    // ✅ CORREÇÃO: Extrai ID e nome do produto corretamente
+    let productId = '';
+    let productName = 'Produto não encontrado';
+    
+    if (price.product_name) {
+        // Se já tem product_name (retornado pelo backend para SaaS admins)
+        productName = price.product_name;
+        productId = price.product_id || price.product?.id || (typeof price.product === 'string' ? price.product : '');
+    } else if (price.product) {
+        if (typeof price.product === 'string') {
+            // Se product é uma string (ID)
+            productId = price.product;
+        } else if (price.product.id) {
+            // Se product é um objeto
+            productId = price.product.id;
+            productName = price.product.name || productName;
+        }
+    } else if (price.product_id) {
+        productId = price.product_id;
+    }
+    
+    // ✅ CORREÇÃO: Usa amount se disponível (já convertido para reais), senão unit_amount
+    // Se unit_amount está em centavos (valor alto), divide por 100; senão usa direto
+    let amount = price.amount !== undefined ? price.amount : price.unit_amount;
+    
+    // Se unit_amount parece estar em centavos (valor > 1000), divide por 100
+    if (price.amount === undefined && price.unit_amount && price.unit_amount > 1000) {
+        amount = price.unit_amount / 100;
+    }
     
     document.getElementById('priceInfo').innerHTML = `
         <div class="row">
             <div class="col-md-6">
                 <p><strong>ID:</strong> <code>${price.id}</code></p>
-                <p><strong>Produto:</strong> <a href="/product-details?id=${price.product}">${price.product}</a></p>
-                <p><strong>Valor:</strong> ${formatCurrency(price.unit_amount, price.currency)}</p>
+                <p><strong>Produto:</strong> ${productId ? `<a href="/product-details?id=${productId}">${productName}</a>` : productName}</p>
+                <p><strong>Valor:</strong> ${formatCurrencyReais(amount, price.currency)}</p>
                 <p><strong>Moeda:</strong> ${price.currency.toUpperCase()}</p>
             </div>
             <div class="col-md-6">

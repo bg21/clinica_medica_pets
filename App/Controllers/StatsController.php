@@ -40,8 +40,10 @@ class StatsController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
+            // ✅ CORREÇÃO: Permite acesso de SaaS admins
+            if (!$isSaasAdmin && $tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_stats']);
                 return;
             }
@@ -49,8 +51,11 @@ class StatsController
             $queryParams = Flight::request()->query;
             $period = $queryParams['period'] ?? 'all';
 
-            // ✅ OTIMIZAÇÃO: Cache de 60 segundos (stats mudam pouco)
-            $cacheKey = sprintf('stats:%d:%s', $tenantId, $period);
+            // ✅ CORREÇÃO: Cache diferente para SaaS admins
+            $cacheKey = $isSaasAdmin 
+                ? sprintf('stats:saas:%s', $period)
+                : sprintf('stats:%d:%s', $tenantId, $period);
+            
             $cached = \App\Services\CacheService::getJson($cacheKey);
             if ($cached !== null) {
                 // Se o cache já tem formato ResponseHelper, usa diretamente
@@ -69,18 +74,64 @@ class StatsController
             // ✅ OTIMIZAÇÃO: Usa queries SQL agregadas (muito mais rápido que carregar tudo em memória)
             $db = \App\Utils\Database::getInstance();
 
-            // Estatísticas de Customers (1 query ao invés de carregar todos)
-            $customerSql = "SELECT 
-                COUNT(*) as total,
-                SUM(CASE WHEN created_at >= :start_date AND created_at <= :end_date THEN 1 ELSE 0 END) as new
-            FROM customers 
-            WHERE tenant_id = :tenant_id";
-            
-            $customerParams = [
-                'tenant_id' => $tenantId,
-                'start_date' => $dateFilter ? date('Y-m-d H:i:s', $dateFilter['start']) : '1970-01-01 00:00:00',
-                'end_date' => $dateFilter ? date('Y-m-d H:i:s', $dateFilter['end']) : date('Y-m-d H:i:s', time())
-            ];
+            // ✅ CORREÇÃO: Para SaaS admins, não filtra por tenant_id
+            if ($isSaasAdmin) {
+                // Estatísticas de Customers (todos os tenants)
+                $customerSql = "SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN created_at >= :start_date AND created_at <= :end_date THEN 1 ELSE 0 END) as new
+                FROM customers";
+                
+                $customerParams = [
+                    'start_date' => $dateFilter ? date('Y-m-d H:i:s', $dateFilter['start']) : '1970-01-01 00:00:00',
+                    'end_date' => $dateFilter ? date('Y-m-d H:i:s', $dateFilter['end']) : date('Y-m-d H:i:s', time())
+                ];
+                
+                // Estatísticas de Assinaturas (todos os tenants)
+                $subscriptionSql = "SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN LOWER(status) = 'active' THEN 1 ELSE 0 END) as active,
+                    SUM(CASE WHEN LOWER(status) = 'canceled' THEN 1 ELSE 0 END) as canceled,
+                    SUM(CASE WHEN LOWER(status) = 'trialing' THEN 1 ELSE 0 END) as trialing,
+                    SUM(CASE WHEN created_at >= :start_date AND created_at <= :end_date THEN 1 ELSE 0 END) as new,
+                    SUM(CASE WHEN LOWER(status) = 'active' THEN COALESCE(amount, 0) ELSE 0 END) as mrr
+                FROM subscriptions";
+                
+                $subscriptionParams = [
+                    'start_date' => $dateFilter ? date('Y-m-d H:i:s', $dateFilter['start']) : '1970-01-01 00:00:00',
+                    'end_date' => $dateFilter ? date('Y-m-d H:i:s', $dateFilter['end']) : date('Y-m-d H:i:s', time())
+                ];
+            } else {
+                // Estatísticas de Customers (1 query ao invés de carregar todos)
+                $customerSql = "SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN created_at >= :start_date AND created_at <= :end_date THEN 1 ELSE 0 END) as new
+                FROM customers 
+                WHERE tenant_id = :tenant_id";
+                
+                $customerParams = [
+                    'tenant_id' => $tenantId,
+                    'start_date' => $dateFilter ? date('Y-m-d H:i:s', $dateFilter['start']) : '1970-01-01 00:00:00',
+                    'end_date' => $dateFilter ? date('Y-m-d H:i:s', $dateFilter['end']) : date('Y-m-d H:i:s', time())
+                ];
+                
+                // ✅ OTIMIZAÇÃO: Estatísticas de Assinaturas em 1 query agregada (ao invés de loop PHP)
+                $subscriptionSql = "SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN LOWER(status) = 'active' THEN 1 ELSE 0 END) as active,
+                    SUM(CASE WHEN LOWER(status) = 'canceled' THEN 1 ELSE 0 END) as canceled,
+                    SUM(CASE WHEN LOWER(status) = 'trialing' THEN 1 ELSE 0 END) as trialing,
+                    SUM(CASE WHEN created_at >= :start_date AND created_at <= :end_date THEN 1 ELSE 0 END) as new,
+                    SUM(CASE WHEN LOWER(status) = 'active' THEN COALESCE(amount, 0) ELSE 0 END) as mrr
+                FROM subscriptions 
+                WHERE tenant_id = :tenant_id";
+                
+                $subscriptionParams = [
+                    'tenant_id' => $tenantId,
+                    'start_date' => $dateFilter ? date('Y-m-d H:i:s', $dateFilter['start']) : '1970-01-01 00:00:00',
+                    'end_date' => $dateFilter ? date('Y-m-d H:i:s', $dateFilter['end']) : date('Y-m-d H:i:s', time())
+                ];
+            }
             
             $customerStmt = $db->prepare($customerSql);
             $customerStmt->execute($customerParams);
@@ -88,23 +139,6 @@ class StatsController
             
             $totalCustomers = (int)($customerStats['total'] ?? 0);
             $newCustomers = $dateFilter ? (int)($customerStats['new'] ?? 0) : $totalCustomers;
-
-            // ✅ OTIMIZAÇÃO: Estatísticas de Assinaturas em 1 query agregada (ao invés de loop PHP)
-            $subscriptionSql = "SELECT 
-                COUNT(*) as total,
-                SUM(CASE WHEN LOWER(status) = 'active' THEN 1 ELSE 0 END) as active,
-                SUM(CASE WHEN LOWER(status) = 'canceled' THEN 1 ELSE 0 END) as canceled,
-                SUM(CASE WHEN LOWER(status) = 'trialing' THEN 1 ELSE 0 END) as trialing,
-                SUM(CASE WHEN created_at >= :start_date AND created_at <= :end_date THEN 1 ELSE 0 END) as new,
-                SUM(CASE WHEN LOWER(status) = 'active' THEN COALESCE(amount, 0) ELSE 0 END) as mrr
-            FROM subscriptions 
-            WHERE tenant_id = :tenant_id";
-            
-            $subscriptionParams = [
-                'tenant_id' => $tenantId,
-                'start_date' => $dateFilter ? date('Y-m-d H:i:s', $dateFilter['start']) : '1970-01-01 00:00:00',
-                'end_date' => $dateFilter ? date('Y-m-d H:i:s', $dateFilter['end']) : date('Y-m-d H:i:s', time())
-            ];
             
             $subscriptionStmt = $db->prepare($subscriptionSql);
             $subscriptionStmt->execute($subscriptionParams);

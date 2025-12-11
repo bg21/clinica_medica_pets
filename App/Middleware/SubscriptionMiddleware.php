@@ -47,6 +47,24 @@ class SubscriptionMiddleware
             return null; // Deixa AuthMiddleware tratar
         }
 
+        // ✅ OBRIGATÓRIO: Verifica se tenant tem Stripe Connect configurado
+        $stripeAccountModel = new \App\Models\TenantStripeAccount();
+        $stripeAccount = $stripeAccountModel->findByTenant($tenantId);
+        
+        if (!$stripeAccount || (empty($stripeAccount['stripe_secret_key']) && empty($stripeAccount['stripe_account_id']))) {
+            Logger::warning("Tentativa de acesso sem Stripe Connect configurado", [
+                'tenant_id' => $tenantId
+            ]);
+            
+            return [
+                'error' => true,
+                'message' => 'É necessário configurar sua conta Stripe antes de continuar. Configure em Configurações > Conectar Stripe.',
+                'code' => 'STRIPE_CONNECT_REQUIRED',
+                'redirect_url' => '/stripe-connect',
+                'http_code' => 402 // Payment Required
+            ];
+        }
+
         // Busca assinatura ativa
         $subscription = $this->subscriptionModel->findActiveByTenant($tenantId);
 
@@ -116,13 +134,19 @@ class SubscriptionMiddleware
         $excludedRoutes = [
             '/login',
             '/register',
-            '/choose-plan',
             '/subscription-success',
+            '/stripe-connect', // ✅ Permite acessar página de configuração do Stripe
+            '/stripe-connect/success',
             '/v1/auth/login',
             '/v1/auth/register',
             '/v1/auth/register-employee',
             '/v1/saas/plans',
             '/v1/saas/checkout',
+            '/v1/subscriptions/current', // Permite verificar assinatura atual mesmo sem assinatura ativa
+            '/v1/stripe-connect', // ✅ Permite configurar Stripe Connect
+            '/v1/stripe-connect/onboarding',
+            '/v1/stripe-connect/account',
+            '/v1/stripe-connect/api-key',
             '/v1/webhook',
             '/health',
             '/health/detailed',

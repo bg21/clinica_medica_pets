@@ -162,21 +162,33 @@ async function loadCustomers() {
         // ✅ CORREÇÃO: response.data já é o array de clientees
         const customers = Array.isArray(response.data) ? response.data : [];
         
+        console.log('Clientes carregados:', customers); // Debug
+        
         const select = document.getElementById('customerFilter');
         // Limpa opções existentes (exceto a primeira)
         while (select.children.length > 1) {
             select.removeChild(select.lastChild);
         }
         
+        if (customers.length === 0) {
+            console.warn('Nenhum cliente encontrado');
+            return;
+        }
+        
         customers.forEach(customer => {
             const option = document.createElement('option');
-            option.value = customer.id;
-            const name = customer.name || customer.email || 'Cliente';
-            option.textContent = `${name} (ID: ${customer.id})`;
+            // ✅ CORREÇÃO: Usa stripe_customer_id ou id (pode ser Stripe ID cus_xxx para SaaS admins)
+            const customerId = customer.stripe_customer_id || customer.id;
+            option.value = customerId;
+            
+            // ✅ CORREÇÃO: Prioriza name, depois email, depois customer_name (para SaaS admins)
+            const name = customer.name || customer.customer_name || customer.email || 'Cliente sem nome';
+            option.textContent = `${escapeHtml(name)} (ID: ${escapeHtml(customerId)})`;
             select.appendChild(option);
         });
     } catch (error) {
-        console.warn('Erro ao carregar lista de clientees:', error);
+        console.error('Erro ao carregar lista de clientees:', error);
+        showAlert('Erro ao carregar lista de clientes: ' + (error.message || 'Erro desconhecido'), 'danger');
         // Não bloqueia a funcionalidade se falhar
     }
 }

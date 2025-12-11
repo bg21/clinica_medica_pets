@@ -159,9 +159,9 @@ class ResponseHelper
         $logContext = array_merge(
             ErrorHandler::sanitizeContext($context),
             [
-                'stripe_code' => $exception->getStripeCode(),
-                'stripe_type' => $exception->getStripeType() ?? null,
-                'http_status' => $exception->getHttpStatus(),
+                'stripe_code' => method_exists($exception, 'getStripeCode') ? $exception->getStripeCode() : null,
+                'stripe_type' => method_exists($exception, 'getStripeType') ? $exception->getStripeType() : null,
+                'http_status' => method_exists($exception, 'getHttpStatus') ? $exception->getHttpStatus() : null,
                 'tenant_id' => Flight::get('tenant_id') ?? null,
                 'user_id' => Flight::get('user_id') ?? null,
                 'action' => $context['action'] ?? 'unknown'
@@ -202,18 +202,37 @@ class ResponseHelper
     /**
      * Envia resposta de sucesso
      * 
+     * ✅ CORREÇÃO: Suporta duas assinaturas para compatibilidade:
+     * 1. sendSuccess($data, $message) - formato antigo
+     * 2. sendSuccess($data, $statusCode, $message) - formato novo
+     * 
      * @param mixed $data Dados da resposta
-     * @param int $statusCode Código HTTP (200, 201, etc.)
-     * @param string|null $message Mensagem opcional
+     * @param int|string|null $statusCodeOrMessage Código HTTP (int) ou Mensagem (string) ou null
+     * @param string|null $message Mensagem opcional (se statusCodeOrMessage for int)
+     * @param array|null $meta Metadados opcionais
      */
-    public static function sendSuccess($data, int $statusCode = 200, ?string $message = null, ?array $meta = null): void
+    public static function sendSuccess($data, $statusCodeOrMessage = 200, ?string $message = null, ?array $meta = null): void
     {
+        $statusCode = 200;
+        $finalMessage = null;
+        
+        // ✅ CORREÇÃO: Detecta se segundo parâmetro é string (mensagem) ou int (status code)
+        if (is_string($statusCodeOrMessage)) {
+            // Formato antigo: sendSuccess($data, 'message')
+            $finalMessage = $statusCodeOrMessage;
+            $statusCode = 200; // Padrão
+        } elseif (is_int($statusCodeOrMessage)) {
+            // Formato novo: sendSuccess($data, 200, 'message')
+            $statusCode = $statusCodeOrMessage;
+            $finalMessage = $message;
+        }
+        
         $response = [
             'success' => true
         ];
         
-        if ($message !== null) {
-            $response['message'] = $message;
+        if ($finalMessage !== null) {
+            $response['message'] = $finalMessage;
         }
         
         if ($data !== null) {

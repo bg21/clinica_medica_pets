@@ -11,6 +11,7 @@ use App\Services\ExamService;
 use App\Utils\PermissionHelper;
 use App\Utils\ResponseHelper;
 use App\Utils\Validator;
+use App\Traits\HasModuleAccess;
 use Flight;
 
 /**
@@ -18,7 +19,10 @@ use Flight;
  */
 class ExamController
 {
+    use HasModuleAccess;
+    
     private ExamService $examService;
+    private const MODULE_ID = 'exams';
 
     public function __construct(ExamService $examService)
     {
@@ -38,6 +42,11 @@ class ExamController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_exam']);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "exams"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             
@@ -119,6 +128,11 @@ class ExamController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_exams']);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "exams"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             
@@ -235,6 +249,11 @@ class ExamController
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_exam', 'exam_id' => $id]);
                 return;
             }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "exams"
+            if (!$this->checkModuleAccess()) {
+                return;
+            }
 
             $examModel = new Exam();
             $exam = $examModel->findByTenantAndId($tenantId, (int)$id);
@@ -268,6 +287,11 @@ class ExamController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'update_exam', 'exam_id' => $id]);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "exams"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             
@@ -315,6 +339,11 @@ class ExamController
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'delete_exam', 'exam_id' => $id]);
                 return;
             }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "exams"
+            if (!$this->checkModuleAccess()) {
+                return;
+            }
 
             $examModel = new Exam();
             $exam = $examModel->findByTenantAndId($tenantId, (int)$id);
@@ -350,6 +379,11 @@ class ExamController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_exams_by_pet', 'pet_id' => $petId]);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "exams"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             
@@ -392,6 +426,11 @@ class ExamController
                 return;
             }
             
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "exams"
+            if (!$this->checkModuleAccess()) {
+                return;
+            }
+            
             // Verifica se profissional existe e pertence ao tenant
             $professionalModel = new Professional();
             $professional = $professionalModel->findByTenantAndId($tenantId, (int)$professionalId);
@@ -431,6 +470,11 @@ class ExamController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'pay_exam', 'exam_id' => $id]);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "exams"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             
@@ -493,6 +537,11 @@ class ExamController
                 return;
             }
             
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "exams"
+            if (!$this->checkModuleAccess()) {
+                return;
+            }
+            
             $invoice = $this->examService->getExamInvoice($tenantId, (int)$id);
             
             if (!$invoice) {
@@ -531,6 +580,11 @@ class ExamController
                 return;
             }
             
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "exams"
+            if (!$this->checkModuleAccess()) {
+                return;
+            }
+            
             $examTypeModel = new ExamType();
             $examTypes = $examTypeModel->findActiveByTenant($tenantId);
             
@@ -558,6 +612,11 @@ class ExamController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_exam_type', 'exam_type_id' => $id]);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "exams"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
 
@@ -592,6 +651,11 @@ class ExamController
             $tenantId = Flight::get('tenant_id');
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_exam_type']);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "exams"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             
@@ -634,6 +698,11 @@ class ExamController
                 return;
             }
             
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "exams"
+            if (!$this->checkModuleAccess()) {
+                return;
+            }
+            
             $data = \App\Utils\RequestCache::getJsonInput();
             if ($data === null && json_last_error() !== JSON_ERROR_NONE) {
                 ResponseHelper::sendInvalidJsonError(['action' => 'update_exam_type', 'exam_type_id' => $id]);
@@ -673,6 +742,11 @@ class ExamController
                 return;
             }
             
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "exams"
+            if (!$this->checkModuleAccess()) {
+                return;
+            }
+            
             $examTypeModel = new ExamType();
             $examTypeModel->deleteExamType($tenantId, (int)$id);
             
@@ -696,6 +770,11 @@ class ExamController
             $tenantId = Flight::get('tenant_id');
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'count_exams_by_type', 'exam_type_id' => $id]);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "exams"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
 

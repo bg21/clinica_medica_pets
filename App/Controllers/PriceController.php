@@ -37,6 +37,103 @@ class PriceController
     public function list(): void
     {
         try {
+            $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // Se for administrador SaaS, busca diretamente do Stripe (conta principal)
+            if ($isSaasAdmin && $tenantId === null) {
+                // ✅ CORREÇÃO: Flight::request()->query retorna Collection, precisa converter para array
+                try {
+                    $queryParams = Flight::request()->query->getData();
+                    if (!is_array($queryParams)) {
+                        $queryParams = [];
+                    }
+                } catch (\Exception $e) {
+                    error_log("Erro ao obter query params: " . $e->getMessage());
+                    $queryParams = [];
+                }
+                
+                $options = [];
+                
+                // Processa query params
+                if (isset($queryParams['limit'])) {
+                    $options['limit'] = (int)$queryParams['limit'];
+                }
+                
+                if (!empty($queryParams['starting_after'])) {
+                    $options['starting_after'] = $queryParams['starting_after'];
+                }
+                
+                if (!empty($queryParams['ending_before'])) {
+                    $options['ending_before'] = $queryParams['ending_before'];
+                }
+                
+                if (isset($queryParams['active'])) {
+                    $options['active'] = filter_var($queryParams['active'], FILTER_VALIDATE_BOOLEAN);
+                }
+                
+                if (!empty($queryParams['type'])) {
+                    $options['type'] = $queryParams['type'];
+                }
+                
+                if (!empty($queryParams['product'])) {
+                    $options['product'] = $queryParams['product'];
+                }
+                
+                if (!empty($queryParams['currency'])) {
+                    $options['currency'] = $queryParams['currency'];
+                }
+                
+                // Busca diretamente do Stripe usando conta principal
+                $prices = $this->stripeService->listPrices($options);
+                
+                $pricesData = [];
+                foreach ($prices->data as $price) {
+                    $productId = is_string($price->product) ? $price->product : $price->product->id;
+                    $productName = 'Produto não encontrado';
+                    
+                    // Tenta buscar nome do produto se não estiver expandido
+                    if (is_string($price->product)) {
+                        try {
+                            $product = $this->stripeService->getProduct($productId);
+                            $productName = $product->name ?? $productName;
+                        } catch (\Exception $e) {
+                            // Ignora erro ao buscar produto
+                        }
+                    } elseif (isset($price->product->name)) {
+                        $productName = $price->product->name;
+                    }
+                    
+                    $pricesData[] = [
+                        'id' => $price->id,
+                        'product' => $productId,
+                        'product_name' => $productName,
+                        'active' => $price->active,
+                        'currency' => strtoupper($price->currency),
+                        'unit_amount' => $price->unit_amount ? (float)($price->unit_amount / 100) : 0, // ✅ CORREÇÃO: Garante que é float, já convertido para reais
+                        'amount' => $price->unit_amount ? (float)($price->unit_amount / 100) : 0, // ✅ CORREÇÃO: Adiciona amount para compatibilidade
+                        'type' => $price->type,
+                        'recurring' => $price->recurring ? [
+                            'interval' => $price->recurring->interval,
+                            'interval_count' => $price->recurring->interval_count
+                        ] : null,
+                        'metadata' => (array)$price->metadata,
+                        'created' => date('Y-m-d H:i:s', $price->created)
+                    ];
+                }
+                
+                ResponseHelper::sendSuccess($pricesData, 200, null, [
+                    'has_more' => $prices->has_more,
+                    'total' => count($pricesData)
+                ]);
+                return;
+            }
+            
+            if ($tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_prices']);
+                return;
+            }
+            
             // ✅ CORREÇÃO: Flight::request()->query retorna Collection, precisa converter para array
             try {
                 $queryParams = Flight::request()->query->getData();
@@ -79,20 +176,32 @@ class PriceController
                 $options['currency'] = $queryParams['currency'];
             }
             
-            // ✅ CACHE: Gera chave única baseada em parâmetros
+            // Opção para ignorar filtro de tenant (útil para formulários de criação)
+            $ignoreTenantFilter = isset($queryParams['all_tenants']) && filter_var($queryParams['all_tenants'], FILTER_VALIDATE_BOOLEAN);
+            
+            // ✅ CACHE: Gera chave única baseada em parâmetros (incluindo tenant_id)
             $cacheKey = sprintf(
-                'prices:list:%d:%s:%s:%s:%s:%s:%s',
+                'prices:list:%d:%s:%s:%s:%s:%s:%s:%s:%s',
+                $tenantId ?? 0,
                 $options['limit'] ?? 10,
                 md5($options['starting_after'] ?? ''),
                 md5($options['ending_before'] ?? ''),
                 ($options['active'] ?? '') === true ? '1' : (($options['active'] ?? '') === false ? '0' : ''),
                 $options['type'] ?? '',
                 $options['product'] ?? '',
-                $options['currency'] ?? ''
+                $options['currency'] ?? '',
+                $ignoreTenantFilter ? '1' : '0'
             );
             
-            // ✅ Tenta obter do cache (TTL: 60 segundos)
-            $cached = \App\Services\CacheService::getJson($cacheKey);
+            // ✅ CORREÇÃO: Parâmetro para forçar refresh do cache
+            $forceRefresh = isset($queryParams['refresh']) && filter_var($queryParams['refresh'], FILTER_VALIDATE_BOOLEAN);
+            
+            // ✅ Tenta obter do cache (TTL: 60 segundos) - apenas se não forçar refresh
+            $cached = null;
+            if (!$forceRefresh) {
+                $cached = \App\Services\CacheService::getJson($cacheKey);
+            }
+            
             if ($cached !== null) {
                 // ✅ CORREÇÃO: Se cache tem formato antigo {data: [...], meta: {...}}, converte
                 if (isset($cached['data']) && isset($cached['meta'])) {
@@ -112,11 +221,70 @@ class PriceController
                 return;
             }
             
-            $prices = $this->stripeService->listPrices($options);
+            // ✅ CORREÇÃO: Usa conta Stripe da clínica para listar preços
+            $clinicStripeService = \App\Services\StripeService::forTenant($tenantId);
             
-            // Formata resposta
+            // ✅ CORREÇÃO: Não usa expand (causa erro no Stripe)
+            // Busca o produto individualmente quando necessário (já tem fallback no código)
+            // O Stripe não permite expandir 'product' ou 'data.product' na listagem de prices
+            // Removemos o expand e deixamos o código buscar o produto quando necessário
+            
+            $prices = $clinicStripeService->listPrices($options);
+            
+            Logger::debug("Preços retornados do Stripe", [
+                'tenant_id' => $tenantId,
+                'count' => count($prices->data),
+                'has_more' => $prices->has_more ?? false,
+                'force_refresh' => $forceRefresh ?? false
+            ]);
+            
+            // Formata resposta e filtra por tenant_id (via metadata do produto associado)
             $formattedPrices = [];
             foreach ($prices->data as $price) {
+                // ✅ CORREÇÃO: Filtra prices por tenant_id do produto associado
+                if (!$ignoreTenantFilter && $tenantId !== null) {
+                    // Obtém o produto associado ao price
+                    $product = null;
+                    if (isset($price->product) && is_object($price->product)) {
+                        $product = $price->product;
+                    } elseif (is_string($price->product)) {
+                        // Se produto não foi expandido, busca
+                        try {
+                            $product = $clinicStripeService->getProduct($price->product);
+                        } catch (\Exception $e) {
+                            // Se não conseguir buscar o produto, pula o price
+                            Logger::warning("Produto não encontrado para price", [
+                                'price_id' => $price->id,
+                                'product_id' => $price->product,
+                                'error' => $e->getMessage()
+                            ]);
+                            continue;
+                        }
+                    }
+                    
+                    // Se produto não foi encontrado, pula o price
+                    if (!$product) {
+                        continue;
+                    }
+                    
+                    // Filtra por tenant_id do produto (se tiver metadata tenant_id)
+                    $metadata = $product->metadata->toArray();
+                    if (!empty($metadata) && isset($metadata['tenant_id']) && $metadata['tenant_id'] !== null && $metadata['tenant_id'] !== '') {
+                        // Só filtra se tiver tenant_id definido e for diferente
+                        if ((string)$metadata['tenant_id'] !== (string)$tenantId) {
+                            continue; // Pula prices de produtos de outros tenants
+                        }
+                    }
+                    // Se não tiver tenant_id nos metadados, inclui o price (prices antigos ou compartilhados)
+                    
+                    // ✅ CORREÇÃO: Se estiver filtrando por active=true, também verifica se o produto está ativo
+                    // Isso garante consistência: se o price aparece, o produto também deve aparecer na lista de produtos
+                    if (isset($options['active']) && $options['active'] === true) {
+                        if (!$product->active) {
+                            continue; // Pula prices de produtos inativos quando filtrando apenas ativos
+                        }
+                    }
+                }
                 $priceData = [
                     'id' => $price->id,
                     'active' => $price->active,
@@ -248,7 +416,42 @@ class PriceController
             }
             $data['metadata']['tenant_id'] = $tenantId;
 
-            $price = $this->stripeService->createPrice($data);
+            // ✅ CORREÇÃO: Usa conta Stripe da clínica (não a conta do usuário)
+            // Preços criados pela clínica devem ir para a conta Stripe da clínica
+            $clinicStripeService = \App\Services\StripeService::forTenant($tenantId);
+            $price = $clinicStripeService->createPrice($data);
+            
+            Logger::info("Preço criado na conta Stripe da clínica", [
+                'tenant_id' => $tenantId,
+                'price_id' => $price->id,
+                'product_id' => $price->product
+            ]);
+
+            // ✅ CORREÇÃO: Invalida cache de preços após criar
+            $clinicStripeService->invalidatePricesCache();
+            
+            // ✅ CORREÇÃO: Limpa cache do CacheService (Redis/Memória) para este tenant
+            try {
+                $redis = \App\Services\CacheService::getRedisClient();
+                if ($redis) {
+                    // Busca todas as chaves de cache de preços deste tenant
+                    $keys = $redis->keys('prices:list:' . $tenantId . ':*');
+                    if (!empty($keys)) {
+                        $redis->del($keys);
+                        Logger::debug("Cache de preços invalidado após criação", [
+                            'tenant_id' => $tenantId,
+                            'price_id' => $price->id,
+                            'keys_deleted' => count($keys)
+                        ]);
+                    }
+                }
+            } catch (\Exception $e) {
+                Logger::warning("Erro ao invalidar cache de preços (Redis)", [
+                    'tenant_id' => $tenantId,
+                    'price_id' => $price->id,
+                    'error' => $e->getMessage()
+                ]);
+            }
 
             // Formata resposta
             $priceData = [
@@ -303,15 +506,82 @@ class PriceController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // Se for administrador SaaS, busca diretamente do Stripe (conta principal)
+            if ($isSaasAdmin && $tenantId === null) {
+                // Busca diretamente do Stripe usando conta principal
+                try {
+                    $price = $this->stripeService->getPrice($id);
+                } catch (\Stripe\Exception\InvalidRequestException $e) {
+                    if ($e->getStripeCode() === 'resource_missing') {
+                        ResponseHelper::sendNotFoundError('Preço', ['action' => 'get_price', 'price_id' => $id]);
+                        return;
+                    }
+                    throw $e;
+                }
+                
+                // Busca nome do produto
+                $productId = is_string($price->product) ? $price->product : $price->product->id;
+                $productName = 'Produto não encontrado';
+                if (is_string($price->product)) {
+                    try {
+                        $product = $this->stripeService->getProduct($productId);
+                        $productName = $product->name ?? $productName;
+                    } catch (\Exception $e) {
+                        // Ignora erro ao buscar produto
+                    }
+                } elseif (isset($price->product->name)) {
+                    $productName = $price->product->name;
+                }
+                
+                // Formata resposta
+                $priceData = [
+                    'id' => $price->id,
+                    'active' => $price->active,
+                    'currency' => strtoupper($price->currency),
+                    'type' => $price->type,
+                    'unit_amount' => (float)($price->unit_amount / 100), // ✅ CORREÇÃO: Já convertido para reais
+                    'amount' => (float)($price->unit_amount / 100), // ✅ CORREÇÃO: Adiciona amount para compatibilidade
+                    'unit_amount_decimal' => $price->unit_amount_decimal,
+                    'formatted_amount' => number_format($price->unit_amount / 100, 2, ',', '.'),
+                    'nickname' => $price->nickname ?? null,
+                    'created' => date('Y-m-d H:i:s', $price->created),
+                    'metadata' => (array)$price->metadata
+                ];
+                
+                // Adiciona informações de recorrência se for recurring
+                if ($price->type === 'recurring' && isset($price->recurring)) {
+                    $priceData['recurring'] = [
+                        'interval' => $price->recurring->interval,
+                        'interval_count' => $price->recurring->interval_count,
+                        'trial_period_days' => $price->recurring->trial_period_days ?? null
+                    ];
+                }
+                
+                // Adiciona informações do produto
+                $priceData['product'] = [
+                    'id' => $productId,
+                    'name' => $productName
+                ];
+                $priceData['product_id'] = $productId;
+                $priceData['product_name'] = $productName;
+                
+                ResponseHelper::sendSuccess($priceData);
+                return;
+            }
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_price']);
                 return;
             }
 
+            // ✅ CORREÇÃO: Usa conta Stripe da clínica
+            $clinicStripeService = \App\Services\StripeService::forTenant($tenantId);
+            
             // ✅ CORREÇÃO: Tenta obter o preço do Stripe
             try {
-                $price = $this->stripeService->getPrice($id);
+                $price = $clinicStripeService->getPrice($id);
             } catch (\Stripe\Exception\InvalidRequestException $e) {
                 // Se o preço não existe no Stripe, retorna erro
                 if ($e->getStripeCode() === 'resource_missing') {
@@ -403,14 +673,68 @@ class PriceController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // Se for administrador SaaS, usa conta principal
+            if ($isSaasAdmin && $tenantId === null) {
+                $data = \App\Utils\RequestCache::getJsonInput();
+                
+                if ($data === null) {
+                    if (json_last_error() !== JSON_ERROR_NONE) {
+                        ResponseHelper::sendInvalidJsonError(['price_id' => $id]);
+                        return;
+                    }
+                    $data = [];
+                }
+                
+                // Atualiza preço usando conta principal
+                $price = $this->stripeService->updatePrice($id, $data);
+                
+                // Invalida cache
+                $this->stripeService->invalidatePricesCache();
+                
+                // Busca nome do produto
+                $productId = is_string($price->product) ? $price->product : $price->product->id;
+                $productName = 'Produto não encontrado';
+                if (is_string($price->product)) {
+                    try {
+                        $product = $this->stripeService->getProduct($productId);
+                        $productName = $product->name ?? $productName;
+                    } catch (\Exception $e) {
+                        // Ignora erro ao buscar produto
+                    }
+                } elseif (isset($price->product->name)) {
+                    $productName = $price->product->name;
+                }
+                
+                ResponseHelper::sendSuccess([
+                    'id' => $price->id,
+                    'active' => $price->active,
+                    'currency' => strtoupper($price->currency),
+                    'type' => $price->type,
+                    'unit_amount' => (float)($price->unit_amount / 100),
+                    'amount' => (float)($price->unit_amount / 100),
+                    'product_id' => $productId,
+                    'product_name' => $productName,
+                    'recurring' => $price->recurring ? [
+                        'interval' => $price->recurring->interval,
+                        'interval_count' => $price->recurring->interval_count
+                    ] : null,
+                    'metadata' => (array)$price->metadata
+                ], 200, 'Preço atualizado com sucesso');
+                return;
+            }
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'update_price', 'price_id' => $id]);
                 return;
             }
 
+            // ✅ CORREÇÃO: Usa conta Stripe da clínica
+            $clinicStripeService = \App\Services\StripeService::forTenant($tenantId);
+            
             // Primeiro, verifica se o preço existe e pertence ao tenant
-            $price = $this->stripeService->getPrice($id);
+            $price = $clinicStripeService->getPrice($id);
             
             if (isset($price->metadata->tenant_id) && (string)$price->metadata->tenant_id !== (string)$tenantId) {
                 ResponseHelper::sendNotFoundError('Preço', ['action' => 'update_price', 'price_id' => $id, 'tenant_id' => $tenantId]);
@@ -434,7 +758,33 @@ class PriceController
                 $data['metadata']['tenant_id'] = $tenantId;
             }
 
-            $price = $this->stripeService->updatePrice($id, $data);
+            $price = $clinicStripeService->updatePrice($id, $data);
+
+            // ✅ CORREÇÃO: Invalida cache de preços após atualizar
+            $clinicStripeService->invalidatePricesCache();
+            
+            // ✅ CORREÇÃO: Limpa cache do CacheService (Redis/Memória) para este tenant
+            try {
+                $redis = \App\Services\CacheService::getRedisClient();
+                if ($redis) {
+                    // Busca todas as chaves de cache de preços deste tenant
+                    $keys = $redis->keys('prices:list:' . $tenantId . ':*');
+                    if (!empty($keys)) {
+                        $redis->del($keys);
+                        Logger::debug("Cache de preços invalidado após atualização", [
+                            'tenant_id' => $tenantId,
+                            'price_id' => $id,
+                            'keys_deleted' => count($keys)
+                        ]);
+                    }
+                }
+            } catch (\Exception $e) {
+                Logger::warning("Erro ao invalidar cache de preços (Redis)", [
+                    'tenant_id' => $tenantId,
+                    'price_id' => $id,
+                    'error' => $e->getMessage()
+                ]);
+            }
 
             // Formata resposta
             $priceData = [
@@ -496,18 +846,34 @@ class PriceController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // Se for administrador SaaS, usa conta principal
+            if ($isSaasAdmin && $tenantId === null) {
+                // Desativa preço usando conta principal (Stripe não permite deletar, apenas desativar)
+                $this->stripeService->updatePrice($id, ['active' => false]);
+                
+                // Invalida cache
+                $this->stripeService->invalidatePricesCache();
+                
+                ResponseHelper::sendSuccess(null, 200, 'Preço desativado com sucesso');
+                return;
+            }
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'delete_price', 'price_id' => $id]);
                 return;
             }
 
+            // ✅ CORREÇÃO: Usa conta Stripe da clínica
+            $clinicStripeService = \App\Services\StripeService::forTenant($tenantId);
+            
             // Primeiro, verifica se o preço existe e pertence ao tenant
-            $price = $this->stripeService->getPrice($id);
+            $price = $clinicStripeService->getPrice($id);
             
             // Verifica se o preço pertence ao tenant (via produto)
             if ($price->product && is_string($price->product)) {
-                $product = $this->stripeService->getProduct($price->product);
+                $product = $clinicStripeService->getProduct($price->product);
                 if (isset($product->metadata->tenant_id) && (string)$product->metadata->tenant_id !== (string)$tenantId) {
                     ResponseHelper::sendNotFoundError('Preço', ['price_id' => $id, 'tenant_id' => $tenantId]);
                     return;
@@ -515,10 +881,33 @@ class PriceController
             }
 
             // Desativa o preço (Stripe não permite deletar completamente)
-            $price = $this->stripeService->updatePrice($id, ['active' => false]);
+            $price = $clinicStripeService->updatePrice($id, ['active' => false]);
 
-            // Invalida cache de preços após desativar
-            $this->stripeService->invalidatePricesCache();
+            // ✅ CORREÇÃO: Invalida cache de preços após desativar
+            $clinicStripeService->invalidatePricesCache();
+            
+            // ✅ CORREÇÃO: Limpa cache do CacheService (Redis/Memória) para este tenant
+            try {
+                $redis = \App\Services\CacheService::getRedisClient();
+                if ($redis) {
+                    // Busca todas as chaves de cache de preços deste tenant
+                    $keys = $redis->keys('prices:list:' . $tenantId . ':*');
+                    if (!empty($keys)) {
+                        $redis->del($keys);
+                        Logger::debug("Cache de preços invalidado após exclusão", [
+                            'tenant_id' => $tenantId,
+                            'price_id' => $id,
+                            'keys_deleted' => count($keys)
+                        ]);
+                    }
+                }
+            } catch (\Exception $e) {
+                Logger::warning("Erro ao invalidar cache de preços (Redis)", [
+                    'tenant_id' => $tenantId,
+                    'price_id' => $id,
+                    'error' => $e->getMessage()
+                ]);
+            }
 
             ResponseHelper::sendSuccess([
                 'id' => $price->id,

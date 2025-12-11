@@ -39,8 +39,30 @@ class PaymentController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
+            // ✅ CORREÇÃO: Para SaaS admin, usa conta principal; para clínicas, verifica Stripe Connect
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                // ✅ CORREÇÃO: Verifica se tenant tem Stripe Connect configurado
+                $stripeAccountModel = new \App\Models\TenantStripeAccount();
+                $stripeAccount = $stripeAccountModel->findByTenant($tenantId);
+                
+                if (!$stripeAccount || (empty($stripeAccount['stripe_secret_key']) && empty($stripeAccount['stripe_account_id']))) {
+                    ResponseHelper::sendError(
+                        402,
+                        'Stripe Connect não configurado',
+                        'É necessário configurar sua conta Stripe antes de receber pagamentos. Configure em Configurações > Conectar Stripe.',
+                        'STRIPE_CONNECT_REQUIRED',
+                        [],
+                        ['action' => 'create_payment_intent', 'tenant_id' => $tenantId]
+                    );
+                    return;
+                }
+                
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_payment_intent']);
                 return;
             }
@@ -68,13 +90,24 @@ class PaymentController
                 return;
             }
 
-            // Adiciona tenant_id aos metadados se não existir
-            if (!isset($data['metadata'])) {
-                $data['metadata'] = [];
+            // Adiciona tenant_id aos metadados se não existir (apenas para clínicas)
+            if (!$isSaasAdmin && $tenantId !== null) {
+                if (!isset($data['metadata'])) {
+                    $data['metadata'] = [];
+                }
+                $data['metadata']['tenant_id'] = $tenantId;
             }
-            $data['metadata']['tenant_id'] = $tenantId;
 
-            $paymentIntent = $this->stripeService->createPaymentIntent($data);
+            // ✅ CORREÇÃO: Usa o StripeService determinado acima
+            $paymentIntent = $stripeService->createPaymentIntent($data);
+            
+            // ✅ TAXA DE PLATAFORMA: Aplica taxa se estiver ativada
+            if (\App\Services\PlatformFeeService::isEnabled()) {
+                \App\Services\PlatformFeeService::applyFeeToPayment(
+                    $paymentIntent->id,
+                    $stripeAccount['stripe_account_id'] ?? null
+                );
+            }
 
             ResponseHelper::sendCreated([
                 'id' => $paymentIntent->id,
@@ -109,9 +142,15 @@ class PaymentController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_payment_intent']);
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_refund']);
                 return;
             }
 
@@ -192,13 +231,15 @@ class PaymentController
                 $options['metadata'] = $data['metadata'];
             }
 
-            // Adiciona tenant_id aos metadados se não existir
-            if (!isset($options['metadata'])) {
-                $options['metadata'] = [];
+            // Adiciona tenant_id aos metadados se não existir (apenas para clínicas)
+            if (!$isSaasAdmin && $tenantId !== null) {
+                if (!isset($options['metadata'])) {
+                    $options['metadata'] = [];
+                }
+                $options['metadata']['tenant_id'] = $tenantId;
             }
-            $options['metadata']['tenant_id'] = $tenantId;
 
-            $refund = $this->stripeService->refundPayment($data['payment_intent_id'], $options);
+            $refund = $stripeService->refundPayment($data['payment_intent_id'], $options);
 
             ResponseHelper::sendCreated([
                 'id' => $refund->id,

@@ -663,5 +663,182 @@ class EmailService
         return $this->enviar($destinatario, $assunto, $corpo, $nome);
     }
 
+    /**
+     * Envia email quando agendamento é criado
+     *
+     * @param array $appointment Dados do agendamento
+     * @param array $client Dados do cliente
+     * @param array $pet Dados do pet
+     * @param array $professional Dados do profissional
+     * @return bool
+     */
+    public function sendAppointmentCreated(array $appointment, array $client, array $pet, array $professional): bool
+    {
+        $assunto = '✅ Agendamento Confirmado - ' . ($_ENV['APP_NAME'] ?? 'Clínica Veterinária');
+        
+        $appointmentDate = isset($appointment['appointment_date']) 
+            ? date('d/m/Y H:i', strtotime($appointment['appointment_date'])) 
+            : 'Data não informada';
+        
+        $data = [
+            'client_name' => $client['name'] ?? 'Cliente',
+            'client_email' => $client['email'] ?? '',
+            'pet_name' => $pet['name'] ?? 'Pet',
+            'professional_name' => $professional['name'] ?? 'Profissional',
+            'appointment_date' => $appointmentDate,
+            'appointment_type' => $appointment['type'] ?? 'Consulta',
+            'appointment_notes' => $appointment['notes'] ?? '',
+            'appointment_id' => $appointment['id'] ?? 'N/A',
+            'app_url' => $_ENV['APP_URL'] ?? 'http://localhost',
+            'support_email' => $this->supportEmail,
+            'app_name' => $_ENV['APP_NAME'] ?? 'Clínica Veterinária'
+        ];
+        
+        $corpo = $this->renderTemplate('appointment_created', $data);
+        
+        $email = $client['email'] ?? '';
+        if (empty($email)) {
+            Logger::warning("Tentativa de enviar email de agendamento criado sem email do cliente", [
+                'appointment_id' => $appointment['id'] ?? null,
+                'client_id' => $client['id'] ?? null
+            ]);
+            return false;
+        }
+        
+        return $this->enviar($email, $assunto, $corpo, $client['name'] ?? '');
+    }
+
+    /**
+     * Envia email quando agendamento é confirmado
+     *
+     * @param array $appointment Dados do agendamento
+     * @param array $client Dados do cliente
+     * @param array $pet Dados do pet
+     * @param array $professional Dados do profissional
+     * @return bool
+     */
+    public function sendAppointmentConfirmed(array $appointment, array $client, array $pet, array $professional): bool
+    {
+        $assunto = '✅ Agendamento Confirmado - ' . ($_ENV['APP_NAME'] ?? 'Clínica Veterinária');
+        
+        $appointmentDate = isset($appointment['appointment_date']) 
+            ? date('d/m/Y H:i', strtotime($appointment['appointment_date'])) 
+            : 'Data não informada';
+        
+        $data = [
+            'client_name' => $client['name'] ?? 'Cliente',
+            'client_email' => $client['email'] ?? '',
+            'pet_name' => $pet['name'] ?? 'Pet',
+            'professional_name' => $professional['name'] ?? 'Profissional',
+            'appointment_date' => $appointmentDate,
+            'appointment_type' => $appointment['type'] ?? 'Consulta',
+            'appointment_id' => $appointment['id'] ?? 'N/A',
+            'app_url' => $_ENV['APP_URL'] ?? 'http://localhost',
+            'support_email' => $this->supportEmail,
+            'app_name' => $_ENV['APP_NAME'] ?? 'Clínica Veterinária'
+        ];
+        
+        $corpo = $this->renderTemplate('appointment_confirmed', $data);
+        
+        $email = $client['email'] ?? '';
+        if (empty($email)) {
+            Logger::warning("Tentativa de enviar email de agendamento confirmado sem email do cliente", [
+                'appointment_id' => $appointment['id'] ?? null
+            ]);
+            return false;
+        }
+        
+        return $this->enviar($email, $assunto, $corpo, $client['name'] ?? '');
+    }
+
+    /**
+     * Envia email quando agendamento é cancelado
+     *
+     * @param array $appointment Dados do agendamento
+     * @param array $client Dados do cliente
+     * @param array $pet Dados do pet
+     * @param array $professional Dados do profissional
+     * @param string|null $reason Motivo do cancelamento (opcional)
+     * @return bool
+     */
+    public function sendAppointmentCancelled(array $appointment, array $client, array $pet, array $professional, ?string $reason = null): bool
+    {
+        $assunto = '❌ Agendamento Cancelado - ' . ($_ENV['APP_NAME'] ?? 'Clínica Veterinária');
+        
+        $appointmentDate = isset($appointment['appointment_date']) 
+            ? date('d/m/Y H:i', strtotime($appointment['appointment_date'])) 
+            : 'Data não informada';
+        
+        $data = [
+            'client_name' => $client['name'] ?? 'Cliente',
+            'client_email' => $client['email'] ?? '',
+            'pet_name' => $pet['name'] ?? 'Pet',
+            'professional_name' => $professional['name'] ?? 'Profissional',
+            'appointment_date' => $appointmentDate,
+            'appointment_type' => $appointment['type'] ?? 'Consulta',
+            'appointment_id' => $appointment['id'] ?? 'N/A',
+            'cancel_reason' => $reason ?? 'Não informado',
+            'app_url' => $_ENV['APP_URL'] ?? 'http://localhost',
+            'support_email' => $this->supportEmail,
+            'app_name' => $_ENV['APP_NAME'] ?? 'Clínica Veterinária'
+        ];
+        
+        $corpo = $this->renderTemplate('appointment_cancelled', $data);
+        
+        $email = $client['email'] ?? '';
+        if (empty($email)) {
+            Logger::warning("Tentativa de enviar email de agendamento cancelado sem email do cliente", [
+                'appointment_id' => $appointment['id'] ?? null
+            ]);
+            return false;
+        }
+        
+        return $this->enviar($email, $assunto, $corpo, $client['name'] ?? '');
+    }
+
+    /**
+     * Envia lembrete de agendamento (24h antes)
+     *
+     * @param array $appointment Dados do agendamento
+     * @param array $client Dados do cliente
+     * @param array $pet Dados do pet
+     * @param array $professional Dados do profissional
+     * @return bool
+     */
+    public function sendAppointmentReminder(array $appointment, array $client, array $pet, array $professional): bool
+    {
+        $assunto = '⏰ Lembrete: Você tem um agendamento amanhã - ' . ($_ENV['APP_NAME'] ?? 'Clínica Veterinária');
+        
+        $appointmentDate = isset($appointment['appointment_date']) 
+            ? date('d/m/Y H:i', strtotime($appointment['appointment_date'])) 
+            : 'Data não informada';
+        
+        $data = [
+            'client_name' => $client['name'] ?? 'Cliente',
+            'client_email' => $client['email'] ?? '',
+            'pet_name' => $pet['name'] ?? 'Pet',
+            'professional_name' => $professional['name'] ?? 'Profissional',
+            'appointment_date' => $appointmentDate,
+            'appointment_type' => $appointment['type'] ?? 'Consulta',
+            'appointment_notes' => $appointment['notes'] ?? '',
+            'appointment_id' => $appointment['id'] ?? 'N/A',
+            'app_url' => $_ENV['APP_URL'] ?? 'http://localhost',
+            'support_email' => $this->supportEmail,
+            'app_name' => $_ENV['APP_NAME'] ?? 'Clínica Veterinária'
+        ];
+        
+        $corpo = $this->renderTemplate('appointment_reminder', $data);
+        
+        $email = $client['email'] ?? '';
+        if (empty($email)) {
+            Logger::warning("Tentativa de enviar lembrete de agendamento sem email do cliente", [
+                'appointment_id' => $appointment['id'] ?? null
+            ]);
+            return false;
+        }
+        
+        return $this->enviar($email, $assunto, $corpo, $client['name'] ?? '');
+    }
+
 }
 

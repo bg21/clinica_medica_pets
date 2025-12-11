@@ -58,5 +58,62 @@ class StripeEvent extends BaseModel
             'data' => json_encode($data)
         ]);
     }
+
+    /**
+     * Busca eventos falhados (não processados) nas últimas N horas
+     * 
+     * @param int $hours Número de horas para buscar (padrão: 24)
+     * @return array Lista de eventos falhados
+     */
+    public function findFailedEvents(int $hours = 24): array
+    {
+        $dateFrom = date('Y-m-d H:i:s', strtotime("-{$hours} hours"));
+        
+        $sql = "
+            SELECT 
+                id,
+                event_id,
+                event_type,
+                processed,
+                created_at,
+                data
+            FROM {$this->table}
+            WHERE (processed = 0 OR processed IS NULL)
+                AND created_at >= :date_from
+            ORDER BY created_at DESC
+        ";
+
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute(['date_from' => $dateFrom]);
+        
+        return $stmt->fetchAll(\PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * Conta eventos falhados por tipo nas últimas N horas
+     * 
+     * @param int $hours Número de horas para buscar (padrão: 24)
+     * @return array Contagem de eventos falhados por tipo
+     */
+    public function countFailedEventsByType(int $hours = 24): array
+    {
+        $dateFrom = date('Y-m-d H:i:s', strtotime("-{$hours} hours"));
+        
+        $sql = "
+            SELECT 
+                event_type,
+                COUNT(*) as failure_count
+            FROM {$this->table}
+            WHERE (processed = 0 OR processed IS NULL)
+                AND created_at >= :date_from
+            GROUP BY event_type
+            ORDER BY failure_count DESC
+        ";
+
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute(['date_from' => $dateFrom]);
+        
+        return $stmt->fetchAll(\PDO::FETCH_ASSOC);
+    }
 }
 

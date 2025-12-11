@@ -220,15 +220,24 @@ if (typeof showAlert === 'undefined') {
 }
 
 // ✅ Helper para formatar data (caso não esteja disponível no dashboard.js)
+// ✅ CORREÇÃO: Protege contra redeclaração de dateFormatter
 if (typeof formatDate === 'undefined') {
-    const dateFormatter = new Intl.DateTimeFormat('pt-BR', {
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit'
-    });
+    // Usa dateFormatter global se existir, senão cria local
+    let dateFormatter;
+    if (typeof window.dateFormatter !== 'undefined') {
+        dateFormatter = window.dateFormatter;
+    } else {
+        dateFormatter = new Intl.DateTimeFormat('pt-BR', {
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        });
+        // Armazena globalmente para reutilização
+        window.dateFormatter = dateFormatter;
+    }
     
     function formatDate(timestamp) {
         if (!timestamp) return '-';

@@ -67,7 +67,7 @@ class Commission extends BaseModel
         $offset = ($page - 1) * $limit;
         $conditions = ['tenant_id' => $tenantId];
         
-        // Adiciona filtros
+        // Adiciona filtros simples
         if (!empty($filters['user_id'])) {
             $conditions['user_id'] = (int)$filters['user_id'];
         }
@@ -76,13 +76,9 @@ class Commission extends BaseModel
             $conditions['status'] = $filters['status'];
         }
         
-        if (!empty($filters['start_date'])) {
-            $conditions['created_at >='] = $filters['start_date'];
-        }
-        
-        if (!empty($filters['end_date'])) {
-            $conditions['created_at <='] = $filters['end_date'];
-        }
+        // ✅ CORREÇÃO: Filtros de data são processados manualmente para compatibilidade SQLite/MySQL
+        // O BaseModel não processa operadores em chaves, então construímos a query manualmente
+        $hasDateFilters = !empty($filters['start_date']) || !empty($filters['end_date']);
         
         $orderBy = [];
         if (!empty($filters['sort'])) {
@@ -94,6 +90,12 @@ class Commission extends BaseModel
             $orderBy['created_at'] = 'DESC';
         }
         
+        // Se há filtros de data, constrói query manualmente
+        if ($hasDateFilters) {
+            return $this->findByTenantWithDateFilters($tenantId, $page, $limit, $filters, $conditions, $orderBy, $offset);
+        }
+        
+        // Caso contrário, usa métodos do BaseModel
         try {
             $result = $this->findAllWithCount($conditions, $orderBy, $limit, $offset);
         } catch (\Exception $e) {
@@ -109,6 +111,89 @@ class Commission extends BaseModel
             'page' => $page,
             'limit' => $limit,
             'total_pages' => ceil($result['total'] / $limit)
+        ];
+    }
+
+    /**
+     * Busca comissões com filtros de data (query manual para compatibilidade)
+     * 
+     * @param int $tenantId ID do tenant
+     * @param int $page Número da página
+     * @param int $limit Itens por página
+     * @param array $filters Filtros incluindo start_date e end_date
+     * @param array $conditions Condições já processadas
+     * @param array $orderBy Ordenação
+     * @param int $offset Offset calculado
+     * @return array Dados paginados
+     */
+    private function findByTenantWithDateFilters(
+        int $tenantId,
+        int $page,
+        int $limit,
+        array $filters,
+        array $conditions,
+        array $orderBy,
+        int $offset
+    ): array {
+        // Constrói WHERE clause
+        $whereParts = ['tenant_id = :tenant_id'];
+        $params = ['tenant_id' => $tenantId];
+        
+        // Adiciona condições simples
+        foreach ($conditions as $key => $value) {
+            if ($key !== 'tenant_id') {
+                $paramKey = str_replace('.', '_', $key);
+                $whereParts[] = "{$key} = :{$paramKey}";
+                $params[$paramKey] = $value;
+            }
+        }
+        
+        // Adiciona filtros de data
+        if (!empty($filters['start_date'])) {
+            $whereParts[] = "created_at >= :start_date";
+            $params['start_date'] = $filters['start_date'];
+        }
+        
+        if (!empty($filters['end_date'])) {
+            $whereParts[] = "created_at <= :end_date";
+            $params['end_date'] = $filters['end_date'];
+        }
+        
+        $whereClause = implode(' AND ', $whereParts);
+        
+        // Constrói ORDER BY
+        $orderParts = [];
+        foreach ($orderBy as $field => $direction) {
+            $orderParts[] = "{$field} " . strtoupper($direction);
+        }
+        $orderClause = !empty($orderParts) ? 'ORDER BY ' . implode(', ', $orderParts) : '';
+        
+        // Query para contar total
+        $countSql = "SELECT COUNT(*) as total FROM {$this->table} WHERE {$whereClause}";
+        $countStmt = $this->db->prepare($countSql);
+        foreach ($params as $key => $value) {
+            $countStmt->bindValue(":{$key}", $value);
+        }
+        $countStmt->execute();
+        $total = (int)$countStmt->fetch(\PDO::FETCH_ASSOC)['total'];
+        
+        // Query para buscar dados
+        $dataSql = "SELECT * FROM {$this->table} WHERE {$whereClause} {$orderClause} LIMIT :limit OFFSET :offset";
+        $dataStmt = $this->db->prepare($dataSql);
+        foreach ($params as $key => $value) {
+            $dataStmt->bindValue(":{$key}", $value);
+        }
+        $dataStmt->bindValue(':limit', $limit, \PDO::PARAM_INT);
+        $dataStmt->bindValue(':offset', $offset, \PDO::PARAM_INT);
+        $dataStmt->execute();
+        $data = $dataStmt->fetchAll(\PDO::FETCH_ASSOC);
+        
+        return [
+            'data' => $data,
+            'total' => $total,
+            'page' => $page,
+            'limit' => $limit,
+            'total_pages' => ceil($total / $limit)
         ];
     }
 

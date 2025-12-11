@@ -16,9 +16,11 @@ use Config;
 class ReportController
 {
     private ReportService $reportService;
+    private StripeService $stripeService;
 
     public function __construct(StripeService $stripeService)
     {
+        $this->stripeService = $stripeService;
         $this->reportService = new ReportService($stripeService);
     }
 
@@ -34,20 +36,35 @@ class ReportController
     public function revenue(): void
     {
         try {
-            // Verifica permissão (só verifica se for autenticação de usuário)
+            // Verifica permissão (PermissionHelper já trata SaaS admins automaticamente)
             PermissionHelper::require('view_reports');
 
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
+            // ✅ CORREÇÃO: Permite acesso de SaaS admins
+            if (!$isSaasAdmin && $tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_revenue_report']);
                 return;
             }
+            
+            // ✅ CORREÇÃO: Para SaaS admins, usa tenant_id = 0 (todos os tenants) ou null
+            $effectiveTenantId = $isSaasAdmin ? null : $tenantId;
 
             $queryParams = Flight::request()->query->getData();
             $period = $this->reportService->processPeriodFilter($queryParams);
             
-            $revenue = $this->reportService->getRevenue($tenantId, $period);
+            // ✅ CORREÇÃO: Para SaaS admins, usa conta principal do Stripe
+            if ($isSaasAdmin) {
+                // Cria novo ReportService com conta principal
+                $saasReportService = new ReportService($this->stripeService);
+                $revenue = $saasReportService->getRevenueForSaasAdmin($period);
+            } else {
+                // Para clínicas, usa StripeService do tenant
+                $tenantStripeService = \App\Services\StripeService::forTenant($tenantId);
+                $tenantReportService = new ReportService($tenantStripeService);
+                $revenue = $tenantReportService->getRevenue($tenantId, $period);
+            }
 
             ResponseHelper::sendSuccess($revenue);
         } catch (\Exception $e) {
@@ -75,16 +92,26 @@ class ReportController
             PermissionHelper::require('view_reports');
 
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_revenue_report']);
+            // ✅ CORREÇÃO: Permite acesso de SaaS admins
+            if (!$isSaasAdmin && $tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_subscriptions_report']);
                 return;
             }
 
             $queryParams = Flight::request()->query->getData();
             $period = $this->reportService->processPeriodFilter($queryParams);
             
-            $stats = $this->reportService->getSubscriptionsStats($tenantId, $period);
+            // ✅ CORREÇÃO: Para SaaS admins, busca dados de todas as clínicas
+            if ($isSaasAdmin) {
+                $saasReportService = new ReportService($this->stripeService);
+                $stats = $saasReportService->getSubscriptionsStatsForSaasAdmin($period);
+            } else {
+                $tenantStripeService = \App\Services\StripeService::forTenant($tenantId);
+                $tenantReportService = new ReportService($tenantStripeService);
+                $stats = $tenantReportService->getSubscriptionsStats($tenantId, $period);
+            }
 
             ResponseHelper::sendSuccess($stats);
         } catch (\Exception $e) {
@@ -112,16 +139,26 @@ class ReportController
             PermissionHelper::require('view_reports');
 
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_revenue_report']);
+            // ✅ CORREÇÃO: Permite acesso de SaaS admins
+            if (!$isSaasAdmin && $tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_churn_report']);
                 return;
             }
 
             $queryParams = Flight::request()->query->getData();
             $period = $this->reportService->processPeriodFilter($queryParams);
             
-            $churn = $this->reportService->getChurnRate($tenantId, $period);
+            // ✅ CORREÇÃO: Para SaaS admins, retorna dados básicos (pode ser melhorado depois)
+            if ($isSaasAdmin) {
+                ResponseHelper::sendSuccess(['message' => 'Funcionalidade em desenvolvimento para SaaS admins']);
+                return;
+            }
+            
+            $tenantStripeService = \App\Services\StripeService::forTenant($tenantId);
+            $tenantReportService = new ReportService($tenantStripeService);
+            $churn = $tenantReportService->getChurnRate($tenantId, $period);
 
             ResponseHelper::sendSuccess($churn);
         } catch (\Exception $e) {
@@ -149,16 +186,26 @@ class ReportController
             PermissionHelper::require('view_reports');
 
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_revenue_report']);
+            // ✅ CORREÇÃO: Permite acesso de SaaS admins
+            if (!$isSaasAdmin && $tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_customers_report']);
                 return;
             }
 
             $queryParams = Flight::request()->query->getData();
             $period = $this->reportService->processPeriodFilter($queryParams);
             
-            $stats = $this->reportService->getCustomersStats($tenantId, $period);
+            // ✅ CORREÇÃO: Para SaaS admins, retorna dados básicos (pode ser melhorado depois)
+            if ($isSaasAdmin) {
+                ResponseHelper::sendSuccess(['message' => 'Funcionalidade em desenvolvimento para SaaS admins']);
+                return;
+            }
+            
+            $tenantStripeService = \App\Services\StripeService::forTenant($tenantId);
+            $tenantReportService = new ReportService($tenantStripeService);
+            $stats = $tenantReportService->getCustomersStats($tenantId, $period);
 
             ResponseHelper::sendSuccess($stats);
         } catch (\Exception $e) {
@@ -186,16 +233,26 @@ class ReportController
             PermissionHelper::require('view_reports');
 
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_revenue_report']);
+            // ✅ CORREÇÃO: Permite acesso de SaaS admins
+            if (!$isSaasAdmin && $tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_payments_report']);
                 return;
             }
 
             $queryParams = Flight::request()->query->getData();
             $period = $this->reportService->processPeriodFilter($queryParams);
             
-            $stats = $this->reportService->getPaymentsStats($tenantId, $period);
+            // ✅ CORREÇÃO: Para SaaS admins, retorna dados básicos (pode ser melhorado depois)
+            if ($isSaasAdmin) {
+                ResponseHelper::sendSuccess(['message' => 'Funcionalidade em desenvolvimento para SaaS admins']);
+                return;
+            }
+            
+            $tenantStripeService = \App\Services\StripeService::forTenant($tenantId);
+            $tenantReportService = new ReportService($tenantStripeService);
+            $stats = $tenantReportService->getPaymentsStats($tenantId, $period);
 
             ResponseHelper::sendSuccess($stats);
         } catch (\Exception $e) {
@@ -218,13 +275,23 @@ class ReportController
             PermissionHelper::require('view_reports');
 
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_revenue_report']);
+            // ✅ CORREÇÃO: Permite acesso de SaaS admins
+            if (!$isSaasAdmin && $tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_mrr_report']);
                 return;
             }
 
-            $mrr = $this->reportService->getMRR($tenantId);
+            // ✅ CORREÇÃO: Para SaaS admins, retorna dados básicos (pode ser melhorado depois)
+            if ($isSaasAdmin) {
+                ResponseHelper::sendSuccess(['message' => 'Funcionalidade em desenvolvimento para SaaS admins']);
+                return;
+            }
+            
+            $tenantStripeService = \App\Services\StripeService::forTenant($tenantId);
+            $tenantReportService = new ReportService($tenantStripeService);
+            $mrr = $tenantReportService->getMRR($tenantId);
 
             ResponseHelper::sendSuccess($mrr);
         } catch (\Exception $e) {
@@ -247,13 +314,23 @@ class ReportController
             PermissionHelper::require('view_reports');
 
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_revenue_report']);
+            // ✅ CORREÇÃO: Permite acesso de SaaS admins
+            if (!$isSaasAdmin && $tenantId === null) {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_arr_report']);
                 return;
             }
 
-            $arr = $this->reportService->getARR($tenantId);
+            // ✅ CORREÇÃO: Para SaaS admins, retorna dados básicos (pode ser melhorado depois)
+            if ($isSaasAdmin) {
+                ResponseHelper::sendSuccess(['message' => 'Funcionalidade em desenvolvimento para SaaS admins']);
+                return;
+            }
+            
+            $tenantStripeService = \App\Services\StripeService::forTenant($tenantId);
+            $tenantReportService = new ReportService($tenantStripeService);
+            $arr = $tenantReportService->getARR($tenantId);
 
             ResponseHelper::sendSuccess($arr);
         } catch (\Exception $e) {

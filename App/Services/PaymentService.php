@@ -47,15 +47,63 @@ class PaymentService
         if (!empty($existingCustomers)) {
             // Retorna o primeiro customer encontrado
             $customer = $existingCustomers[0];
-            return [
-                'id' => (int)$customer['id'],
-                'stripe_customer_id' => $customer['stripe_customer_id'],
-                'email' => $customer['email'],
-                'name' => $customer['name']
-            ];
+            $stripeCustomerId = $customer['stripe_customer_id'];
+            
+            // ✅ VALIDAÇÃO: Verifica se o customer existe no Stripe
+            // Se o ID for um exemplo (cus_exemplo001) ou não existir, cria um novo
+            if (!empty($stripeCustomerId) && !str_starts_with($stripeCustomerId, 'cus_exemplo')) {
+                try {
+                    // Tenta buscar o customer no Stripe para validar
+                    $stripeCustomer = $this->stripeService->getCustomer($stripeCustomerId);
+                    
+                    // Se encontrou, retorna o customer existente
+                    Logger::info("Customer existente validado no Stripe", [
+                        'tenant_id' => $tenantId,
+                        'customer_id' => $customer['id'],
+                        'stripe_customer_id' => $stripeCustomerId
+                    ]);
+                    
+                    return [
+                        'id' => (int)$customer['id'],
+                        'stripe_customer_id' => $stripeCustomerId,
+                        'email' => $customer['email'],
+                        'name' => $customer['name']
+                    ];
+                } catch (\Stripe\Exception\InvalidRequestException $e) {
+                    // Customer não existe no Stripe (pode ser ID antigo ou inválido)
+                    Logger::warning("Customer não encontrado no Stripe, criando novo", [
+                        'tenant_id' => $tenantId,
+                        'old_stripe_customer_id' => $stripeCustomerId,
+                        'error' => $e->getMessage()
+                    ]);
+                    
+                    // Remove o customer inválido do banco (soft delete)
+                    $this->customerModel->delete($customer['id']);
+                    
+                    // Continua para criar um novo customer
+                } catch (\Exception $e) {
+                    Logger::error("Erro ao validar customer no Stripe", [
+                        'tenant_id' => $tenantId,
+                        'stripe_customer_id' => $stripeCustomerId,
+                        'error' => $e->getMessage()
+                    ]);
+                    
+                    // Em caso de erro inesperado, também cria um novo
+                }
+            } else {
+                // ID de exemplo ou vazio, remove e cria novo
+                Logger::warning("Customer com ID de exemplo encontrado, criando novo", [
+                    'tenant_id' => $tenantId,
+                    'old_stripe_customer_id' => $stripeCustomerId
+                ]);
+                
+                if (!empty($customer['id'])) {
+                    $this->customerModel->delete($customer['id']);
+                }
+            }
         }
 
-        // Se não existe, cria novo
+        // Se não existe ou é inválido, cria novo
         $data = [];
         if ($email) {
             $data['email'] = $email;
@@ -69,10 +117,14 @@ class PaymentService
 
     /**
      * Cria cliente e persiste no banco
+     * 
+     * IMPORTANTE: Para assinaturas SaaS, deve usar a conta da PLATAFORMA (não a do tenant)
+     * O StripeService injetado já usa a conta padrão (STRIPE_SECRET do .env)
      */
     public function createCustomer(int $tenantId, array $data): array
     {
-        // Cria no Stripe
+        // ✅ Cria no Stripe usando a conta da PLATAFORMA
+        // O StripeService injetado já usa a conta padrão (STRIPE_SECRET do .env)
         $stripeCustomer = $this->stripeService->createCustomer($data);
 
         // Persiste no banco
@@ -86,10 +138,11 @@ class PaymentService
             ]
         );
 
-        Logger::info("Cliente criado", [
+        Logger::info("Cliente criado na conta da plataforma", [
             'tenant_id' => $tenantId,
             'customer_id' => $customerId,
-            'stripe_customer_id' => $stripeCustomer->id
+            'stripe_customer_id' => $stripeCustomer->id,
+            'using_platform_account' => true
         ]);
 
         return [
@@ -610,6 +663,382 @@ class PaymentService
     }
 
     /**
+     * Obtém métodos de pagamento disponíveis para um país/região
+     * 
+     * @param string $country Código do país (ex: 'br', 'us')
+     * @param string $currency Moeda (ex: 'brl', 'usd')
+     * @return array Lista de tipos de métodos de pagamento disponíveis
+     */
+    public function getAvailablePaymentMethods(string $country = 'br', string $currency = 'brl'): array
+    {
+        $availableMethods = [];
+        
+        // Métodos sempre disponíveis
+        $availableMethods[] = 'card';
+        
+        // Métodos específicos por país
+        if (strtolower($country) === 'br' && strtolower($currency) === 'brl') {
+            // Brasil - métodos locais
+            $availableMethods[] = 'boleto';
+            $availableMethods[] = 'pix';
+        }
+        
+        // Outros países podem ter métodos específicos
+        // Ex: 'us_bank_account' para EUA, 'sepa_debit' para Europa, etc.
+        
+        Logger::info("Métodos de pagamento disponíveis", [
+            'country' => $country,
+            'currency' => $currency,
+            'methods' => $availableMethods
+        ]);
+        
+        return $availableMethods;
+    }
+
+    /**
+     * Detecta método de pagamento preferido do customer
+     * Baseado em histórico de uso, país, e preferências salvas
+     * 
+     * @param string $customerId ID do customer no Stripe
+     * @param string $country Código do país (opcional)
+     * @param string $currency Moeda (opcional)
+     * @return string|null Tipo de método de pagamento preferido
+     */
+    public function detectPreferredPaymentMethod(string $customerId, ?string $country = null, ?string $currency = null): ?string
+    {
+        try {
+            // 1. Tenta obter método padrão do customer
+            $stripeCustomer = $this->stripeService->getCustomer($customerId);
+            
+            if ($stripeCustomer && isset($stripeCustomer->invoice_settings->default_payment_method)) {
+                $defaultPaymentMethodId = is_string($stripeCustomer->invoice_settings->default_payment_method)
+                    ? $stripeCustomer->invoice_settings->default_payment_method
+                    : $stripeCustomer->invoice_settings->default_payment_method->id;
+                
+                $paymentMethod = $this->stripeService->getPaymentMethod($defaultPaymentMethodId);
+                if ($paymentMethod && isset($paymentMethod->type)) {
+                    Logger::info("Método de pagamento preferido detectado (default do customer)", [
+                        'customer_id' => $customerId,
+                        'type' => $paymentMethod->type
+                    ]);
+                    return $paymentMethod->type;
+                }
+            }
+            
+            // 2. Analisa histórico de métodos de pagamento usados com sucesso
+            $paymentMethods = $this->stripeService->listPaymentMethods($customerId, ['limit' => 100]);
+            
+            if (!empty($paymentMethods->data)) {
+                // Conta uso de cada tipo
+                $typeCount = [];
+                foreach ($paymentMethods->data as $pm) {
+                    $type = $pm->type ?? 'unknown';
+                    $typeCount[$type] = ($typeCount[$type] ?? 0) + 1;
+                }
+                
+                // Retorna o tipo mais usado
+                if (!empty($typeCount)) {
+                    arsort($typeCount);
+                    $preferredType = array_key_first($typeCount);
+                    
+                    Logger::info("Método de pagamento preferido detectado (histórico)", [
+                        'customer_id' => $customerId,
+                        'type' => $preferredType,
+                        'usage_count' => $typeCount[$preferredType]
+                    ]);
+                    return $preferredType;
+                }
+            }
+            
+            // 3. Fallback baseado em país/região
+            if ($country && $currency) {
+                $availableMethods = $this->getAvailablePaymentMethods($country, $currency);
+                
+                // Prioridade: card > pix > boleto (para Brasil)
+                if (in_array('pix', $availableMethods)) {
+                    Logger::info("Método de pagamento preferido detectado (fallback: PIX)", [
+                        'customer_id' => $customerId,
+                        'country' => $country
+                    ]);
+                    return 'pix';
+                }
+                
+                if (in_array('boleto', $availableMethods)) {
+                    Logger::info("Método de pagamento preferido detectado (fallback: Boleto)", [
+                        'customer_id' => $customerId,
+                        'country' => $country
+                    ]);
+                    return 'boleto';
+                }
+            }
+            
+            // 4. Padrão final: card
+            Logger::info("Método de pagamento preferido detectado (padrão: card)", [
+                'customer_id' => $customerId
+            ]);
+            return 'card';
+            
+        } catch (\Exception $e) {
+            Logger::error("Erro ao detectar método de pagamento preferido", [
+                'customer_id' => $customerId,
+                'error' => $e->getMessage()
+            ]);
+            // Retorna card como fallback seguro
+            return 'card';
+        }
+    }
+
+    /**
+     * Tenta pagamento com rotação de métodos em caso de falha
+     * Tenta primeiro com método preferido, depois com alternativos
+     * 
+     * @param array $data Dados do pagamento:
+     *   - amount (obrigatório): Valor em centavos
+     *   - currency (obrigatório): Moeda
+     *   - customer_id (obrigatório): ID do customer no Stripe
+     *   - description (opcional): Descrição
+     *   - metadata (opcional): Metadados
+     *   - preferred_method (opcional): Método preferido (se não fornecido, detecta automaticamente)
+     *   - country (opcional): Código do país para detecção
+     * @return array Resultado com payment_intent e método usado
+     */
+    public function processPaymentWithRotation(array $data): array
+    {
+        $customerId = $data['customer_id'] ?? null;
+        if (!$customerId) {
+            throw new \InvalidArgumentException("customer_id é obrigatório");
+        }
+        
+        $amount = $data['amount'] ?? null;
+        $currency = $data['currency'] ?? 'brl';
+        
+        if (!$amount) {
+            throw new \InvalidArgumentException("amount é obrigatório");
+        }
+        
+        // Detecta método preferido se não fornecido
+        $preferredMethod = $data['preferred_method'] ?? null;
+        if (!$preferredMethod) {
+            $country = $data['country'] ?? 'br';
+            $preferredMethod = $this->detectPreferredPaymentMethod($customerId, $country, $currency);
+        }
+        
+        // Obtém métodos disponíveis
+        $country = $data['country'] ?? 'br';
+        $availableMethods = $this->getAvailablePaymentMethods($country, $currency);
+        
+        // Ordena métodos: preferido primeiro, depois outros
+        $methodsToTry = [$preferredMethod];
+        foreach ($availableMethods as $method) {
+            if ($method !== $preferredMethod && !in_array($method, $methodsToTry)) {
+                $methodsToTry[] = $method;
+            }
+        }
+        
+        Logger::info("Iniciando pagamento com rotação de métodos", [
+            'customer_id' => $customerId,
+            'amount' => $amount,
+            'currency' => $currency,
+            'methods_to_try' => $methodsToTry
+        ]);
+        
+        $lastError = null;
+        $attempts = [];
+        
+        // Tenta cada método até um funcionar
+        foreach ($methodsToTry as $method) {
+            try {
+                Logger::info("Tentando pagamento com método", [
+                    'method' => $method,
+                    'attempt' => count($attempts) + 1
+                ]);
+                
+                $paymentIntentData = [
+                    'amount' => $amount,
+                    'currency' => $currency,
+                    'customer_id' => $customerId,
+                    'payment_method_types' => [$method],
+                    'description' => $data['description'] ?? null,
+                    'metadata' => array_merge(
+                        $data['metadata'] ?? [],
+                        [
+                            'payment_method_rotation' => 'true',
+                            'attempt_number' => count($attempts) + 1,
+                            'preferred_method' => $preferredMethod
+                        ]
+                    )
+                ];
+                
+                $paymentIntent = $this->stripeService->createPaymentIntent($paymentIntentData);
+                
+                // Se chegou aqui, o método funcionou
+                Logger::info("Pagamento criado com sucesso usando método", [
+                    'payment_intent_id' => $paymentIntent->id,
+                    'method' => $method,
+                    'attempts' => count($attempts) + 1
+                ]);
+                
+                return [
+                    'success' => true,
+                    'payment_intent' => $paymentIntent,
+                    'method_used' => $method,
+                    'attempts' => count($attempts) + 1,
+                    'all_attempts' => $attempts
+                ];
+                
+            } catch (\Stripe\Exception\CardException $e) {
+                // Erro de cartão - não tenta outros métodos de cartão
+                $errorData = [
+                    'method' => $method,
+                    'error' => $e->getMessage(),
+                    'error_code' => $e->getStripeCode(),
+                    'decline_code' => $e->getDeclineCode()
+                ];
+                $attempts[] = $errorData;
+                $lastError = $e;
+                
+                Logger::warning("Falha no pagamento com método (erro de cartão)", $errorData);
+                
+                // Se é erro de cartão e já tentou card, não tenta outros métodos de cartão
+                if ($method === 'card') {
+                    // Remove outros métodos de cartão da lista
+                    $methodsToTry = array_filter($methodsToTry, function($m) {
+                        return $m !== 'card';
+                    });
+                }
+                
+            } catch (\Stripe\Exception\InvalidRequestException $e) {
+                // Método não suportado ou inválido - tenta próximo
+                $errorData = [
+                    'method' => $method,
+                    'error' => $e->getMessage(),
+                    'error_code' => $e->getStripeCode()
+                ];
+                $attempts[] = $errorData;
+                $lastError = $e;
+                
+                Logger::warning("Método de pagamento não suportado ou inválido", $errorData);
+                
+            } catch (\Exception $e) {
+                // Outro erro - tenta próximo método
+                $errorData = [
+                    'method' => $method,
+                    'error' => $e->getMessage()
+                ];
+                $attempts[] = $errorData;
+                $lastError = $e;
+                
+                Logger::warning("Erro ao processar pagamento com método", $errorData);
+            }
+        }
+        
+        // Se chegou aqui, todos os métodos falharam
+        Logger::error("Todos os métodos de pagamento falharam", [
+            'customer_id' => $customerId,
+            'amount' => $amount,
+            'attempts' => $attempts
+        ]);
+        
+        throw new \RuntimeException(
+            "Não foi possível processar o pagamento com nenhum método disponível. " .
+            "Tentativas: " . count($attempts) . ". " .
+            "Último erro: " . ($lastError ? $lastError->getMessage() : 'Desconhecido'),
+            0,
+            $lastError
+        );
+    }
+
+    /**
+     * Retenta pagamento de invoice com rotação de métodos
+     * Usado quando invoice.payment_failed é recebido
+     * 
+     * @param string $invoiceId ID da invoice no Stripe
+     * @param string|null $preferredMethod Método preferido (opcional)
+     * @return array Resultado do retry
+     */
+    public function retryInvoicePaymentWithRotation(string $invoiceId, ?string $preferredMethod = null): array
+    {
+        try {
+            $invoice = $this->stripeService->getInvoice($invoiceId);
+            
+            if (!$invoice) {
+                throw new \RuntimeException("Invoice não encontrada: {$invoiceId}");
+            }
+            
+            $customerId = $invoice->customer;
+            if (!$customerId) {
+                throw new \RuntimeException("Invoice não tem customer associado");
+            }
+            
+            // Obtém customer do banco para pegar país/região se necessário
+            $customer = $this->customerModel->findByStripeId($customerId);
+            $country = $customer['country'] ?? 'br';
+            $currency = strtolower($invoice->currency ?? 'brl');
+            
+            // Detecta método preferido se não fornecido
+            if (!$preferredMethod) {
+                $preferredMethod = $this->detectPreferredPaymentMethod($customerId, $country, $currency);
+            }
+            
+            Logger::info("Retentando pagamento de invoice com rotação", [
+                'invoice_id' => $invoiceId,
+                'customer_id' => $customerId,
+                'amount' => $invoice->amount_due,
+                'preferred_method' => $preferredMethod
+            ]);
+            
+            // Tenta pagar a invoice usando rotação
+            $result = $this->processPaymentWithRotation([
+                'amount' => $invoice->amount_due,
+                'currency' => $currency,
+                'customer_id' => $customerId,
+                'description' => "Retry payment for invoice {$invoiceId}",
+                'metadata' => [
+                    'invoice_id' => $invoiceId,
+                    'retry' => 'true',
+                    'original_attempt_count' => $invoice->attempt_count ?? 0
+                ],
+                'preferred_method' => $preferredMethod,
+                'country' => $country
+            ]);
+            
+            // Se payment intent foi criado, tenta confirmar
+            if ($result['success'] && isset($result['payment_intent'])) {
+                $paymentIntent = $result['payment_intent'];
+                
+                // Se o payment intent precisa de confirmação, retorna para o cliente confirmar
+                if ($paymentIntent->status === 'requires_confirmation' || $paymentIntent->status === 'requires_payment_method') {
+                    return [
+                        'success' => true,
+                        'requires_action' => true,
+                        'payment_intent' => $paymentIntent,
+                        'method_used' => $result['method_used'],
+                        'client_secret' => $paymentIntent->client_secret
+                    ];
+                }
+                
+                // Se já está succeeded, ótimo
+                if ($paymentIntent->status === 'succeeded') {
+                    return [
+                        'success' => true,
+                        'payment_intent' => $paymentIntent,
+                        'method_used' => $result['method_used']
+                    ];
+                }
+            }
+            
+            return $result;
+            
+        } catch (\Exception $e) {
+            Logger::error("Erro ao retentar pagamento de invoice com rotação", [
+                'invoice_id' => $invoiceId,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
      * Trata payment_intent.succeeded
      * Pagamento confirmado com sucesso
      */
@@ -742,10 +1171,25 @@ class PaymentService
                 : null
         ]);
 
-        // Aqui você pode adicionar lógica adicional, como:
-        // - Enviar email de lembrete ao cliente
-        // - Notificar sobre fatura próxima
-        // - Verificar se há método de pagamento válido
+        // ✅ NOVO: Envia email de fatura próxima
+        try {
+            if ($invoice->customer) {
+                $customer = $this->customerModel->findByStripeId($invoice->customer);
+                if ($customer) {
+                    $this->emailService->enviarNotificacaoFaturaProxima(
+                        $invoice->toArray(),
+                        $customer
+                    );
+                }
+            }
+        } catch (\Exception $e) {
+            // Log erro, mas não falha o processamento do webhook
+            Logger::error('Erro ao enviar email de fatura próxima', [
+                'error' => $e->getMessage(),
+                'invoice_id' => $invoice->id,
+                'customer_id' => $invoice->customer
+            ]);
+        }
     }
 
     /**
@@ -908,6 +1352,257 @@ class PaymentService
             'email' => $account->email ?? null,
             'country' => $account->country ?? null
         ]);
+    }
+
+    /**
+     * Remove métodos de pagamento expirados de um customer
+     * Verifica cartões expirados e remove automaticamente
+     * 
+     * @param string $customerId ID do customer no Stripe
+     * @return array Resultado com métodos removidos
+     */
+    public function removeExpiredPaymentMethods(string $customerId): array
+    {
+        try {
+            $removed = [];
+            $currentYear = (int)date('Y');
+            $currentMonth = (int)date('m');
+            
+            // Lista todos os métodos de pagamento do customer
+            $paymentMethods = $this->stripeService->listPaymentMethods($customerId, ['limit' => 100]);
+            
+            foreach ($paymentMethods->data as $pm) {
+                // Só verifica cartões
+                if ($pm->type === 'card' && isset($pm->card)) {
+                    $expYear = (int)($pm->card->exp_year ?? 0);
+                    $expMonth = (int)($pm->card->exp_month ?? 0);
+                    
+                    // Verifica se está expirado
+                    $isExpired = false;
+                    if ($expYear < $currentYear) {
+                        $isExpired = true;
+                    } elseif ($expYear === $currentYear && $expMonth < $currentMonth) {
+                        $isExpired = true;
+                    }
+                    
+                    if ($isExpired) {
+                        try {
+                            // Remove método expirado
+                            $this->stripeService->detachPaymentMethod($pm->id);
+                            
+                            $removed[] = [
+                                'id' => $pm->id,
+                                'type' => $pm->type,
+                                'last4' => $pm->card->last4 ?? 'N/A',
+                                'exp_month' => $expMonth,
+                                'exp_year' => $expYear
+                            ];
+                            
+                            Logger::info("Método de pagamento expirado removido", [
+                                'payment_method_id' => $pm->id,
+                                'customer_id' => $customerId,
+                                'exp_month' => $expMonth,
+                                'exp_year' => $expYear
+                            ]);
+                        } catch (\Exception $e) {
+                            Logger::error("Erro ao remover método de pagamento expirado", [
+                                'payment_method_id' => $pm->id,
+                                'customer_id' => $customerId,
+                                'error' => $e->getMessage()
+                            ]);
+                        }
+                    }
+                }
+            }
+            
+            return [
+                'removed_count' => count($removed),
+                'removed_methods' => $removed
+            ];
+            
+        } catch (\Exception $e) {
+            Logger::error("Erro ao verificar métodos de pagamento expirados", [
+                'customer_id' => $customerId,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Agenda mudança de plano para uma assinatura
+     * 
+     * @param string $subscriptionId ID da assinatura no Stripe
+     * @param string $newPriceId ID do novo preço
+     * @param int|null $startDate Timestamp de quando aplicar a mudança (null = fim do período atual)
+     * @param array $metadata Metadados opcionais
+     * @return \Stripe\SubscriptionSchedule
+     */
+    public function schedulePlanChange(string $subscriptionId, string $newPriceId, ?int $startDate = null, array $metadata = []): \Stripe\SubscriptionSchedule
+    {
+        try {
+            // Obtém assinatura atual
+            $subscription = $this->stripeService->getSubscription($subscriptionId);
+            
+            // Se já existe schedule, cancela
+            $existingSchedule = $this->stripeService->getSubscriptionSchedule($subscriptionId);
+            if ($existingSchedule) {
+                $this->stripeService->cancelSubscriptionSchedule($existingSchedule->id);
+            }
+
+            // Se não especificou data, agenda para o fim do período atual
+            if ($startDate === null) {
+                $startDate = $subscription->current_period_end;
+            }
+
+            // Obtém item atual da assinatura
+            $currentItem = null;
+            if (!empty($subscription->items->data)) {
+                $currentItem = $subscription->items->data[0];
+            }
+
+            // Cria schedule com duas fases:
+            // Fase 1: Período atual (até startDate)
+            // Fase 2: Novo plano (a partir de startDate)
+            $phases = [];
+
+            // Fase 1: Período atual
+            if ($currentItem) {
+                $phases[] = [
+                    'items' => [[
+                        'price' => $currentItem->price->id,
+                        'quantity' => $currentItem->quantity ?? 1
+                    ]],
+                    'end_date' => $startDate
+                ];
+            }
+
+            // Fase 2: Novo plano
+            $phases[] = [
+                'items' => [[
+                    'price' => $newPriceId,
+                    'quantity' => $currentItem->quantity ?? 1
+                ]],
+                'start_date' => $startDate
+            ];
+
+            $schedule = $this->stripeService->createSubscriptionSchedule($subscriptionId, [
+                'phases' => $phases,
+                'metadata' => array_merge($metadata, [
+                    'scheduled_plan_change' => 'true',
+                    'old_price_id' => $currentItem->price->id ?? null,
+                    'new_price_id' => $newPriceId
+                ])
+            ]);
+
+            Logger::info("Mudança de plano agendada", [
+                'subscription_id' => $subscriptionId,
+                'schedule_id' => $schedule->id,
+                'new_price_id' => $newPriceId,
+                'start_date' => date('Y-m-d H:i:s', $startDate)
+            ]);
+
+            return $schedule;
+        } catch (\Exception $e) {
+            Logger::error("Erro ao agendar mudança de plano", [
+                'subscription_id' => $subscriptionId,
+                'new_price_id' => $newPriceId,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Agenda cancelamento de uma assinatura
+     * 
+     * @param string $subscriptionId ID da assinatura no Stripe
+     * @param int|null $cancelAt Timestamp de quando cancelar (null = fim do período atual)
+     * @param array $metadata Metadados opcionais
+     * @return \Stripe\Subscription
+     */
+    public function scheduleCancellation(string $subscriptionId, ?int $cancelAt = null): \Stripe\Subscription
+    {
+        try {
+            // Se não especificou data, cancela no fim do período atual
+            if ($cancelAt === null) {
+                $subscription = $this->stripeService->getSubscription($subscriptionId);
+                $cancelAt = $subscription->current_period_end;
+            }
+
+            // Marca para cancelar no fim do período
+            $subscription = $this->stripeService->updateSubscription($subscriptionId, [
+                'cancel_at_period_end' => true,
+                'metadata' => [
+                    'scheduled_cancellation' => 'true',
+                    'cancel_at' => (string)$cancelAt
+                ]
+            ]);
+
+            Logger::info("Cancelamento de assinatura agendado", [
+                'subscription_id' => $subscriptionId,
+                'cancel_at' => date('Y-m-d H:i:s', $cancelAt)
+            ]);
+
+            return $subscription;
+        } catch (\Exception $e) {
+            Logger::error("Erro ao agendar cancelamento", [
+                'subscription_id' => $subscriptionId,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Pausa uma assinatura
+     * 
+     * @param string $subscriptionId ID da assinatura no Stripe
+     * @param array $options Opções de pausa
+     * @return \Stripe\Subscription
+     */
+    public function pauseSubscription(string $subscriptionId, array $options = []): \Stripe\Subscription
+    {
+        try {
+            $subscription = $this->stripeService->pauseSubscription($subscriptionId, $options);
+
+            Logger::info("Assinatura pausada", [
+                'subscription_id' => $subscriptionId
+            ]);
+
+            return $subscription;
+        } catch (\Exception $e) {
+            Logger::error("Erro ao pausar assinatura", [
+                'subscription_id' => $subscriptionId,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
+     * Retoma uma assinatura pausada
+     * 
+     * @param string $subscriptionId ID da assinatura no Stripe
+     * @return \Stripe\Subscription
+     */
+    public function resumeSubscription(string $subscriptionId): \Stripe\Subscription
+    {
+        try {
+            $subscription = $this->stripeService->resumeSubscription($subscriptionId);
+
+            Logger::info("Assinatura retomada", [
+                'subscription_id' => $subscriptionId
+            ]);
+
+            return $subscription;
+        } catch (\Exception $e) {
+            Logger::error("Erro ao retomar assinatura", [
+                'subscription_id' => $subscriptionId,
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
     }
 }
 

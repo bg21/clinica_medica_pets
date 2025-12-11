@@ -44,8 +44,14 @@ class PayoutController
             PermissionHelper::require('view_payouts');
             
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_payouts']);
                 return;
             }
@@ -99,7 +105,7 @@ class PayoutController
             }
 
             // Lista payouts
-            $payouts = $this->stripeService->listPayouts($options);
+            $payouts = $stripeService->listPayouts($options);
 
             // Prepara resposta
             $response = [
@@ -165,9 +171,15 @@ class PayoutController
             PermissionHelper::require('view_payouts');
             
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_payouts']);
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_payout']);
                 return;
             }
             
@@ -183,7 +195,7 @@ class PayoutController
             }
 
             // Obtém payout
-            $payout = $this->stripeService->getPayout($id);
+            $payout = $stripeService->getPayout($id);
 
             // Prepara resposta
             $response = [
@@ -309,7 +321,7 @@ class PayoutController
             $data['metadata']['tenant_id'] = $tenantId;
 
             // Cria payout
-            $payout = $this->stripeService->createPayout($data);
+            $payout = $stripeService->createPayout($data);
 
             ResponseHelper::sendCreated([
                 'id' => $payout->id,
@@ -358,9 +370,15 @@ class PayoutController
             PermissionHelper::require('manage_payouts');
             
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_payouts']);
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'cancel_payout']);
                 return;
             }
             
@@ -370,13 +388,13 @@ class PayoutController
                 ResponseHelper::sendValidationError(
                     'ID do payout inválido',
                     $idErrors,
-                    ['action' => 'get_payout', 'payout_id' => $id]
+                    ['action' => 'cancel_payout', 'payout_id' => $id]
                 );
                 return;
             }
 
             // Cancela payout
-            $payout = $this->stripeService->cancelPayout($id);
+            $payout = $stripeService->cancelPayout($id);
 
             ResponseHelper::sendSuccess([
                 'id' => $payout->id,

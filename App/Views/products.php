@@ -187,6 +187,49 @@
     </div>
 </div>
 
+<!-- Modal Editar Produto -->
+<div class="modal fade" id="editProductModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Editar Produto</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form id="editProductForm">
+                <input type="hidden" id="editProductId" name="id">
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">Nome *</label>
+                        <input type="text" class="form-control" id="editProductName" name="name" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Descrição</label>
+                        <textarea class="form-control" id="editProductDescription" name="description" rows="3"></textarea>
+                    </div>
+                    <div class="mb-3">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" name="active" id="editProductActive">
+                            <label class="form-check-label" for="editProductActive">
+                                Produto ativo
+                            </label>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Imagens (URLs, uma por linha)</label>
+                        <textarea class="form-control" name="images" id="editProductImages" rows="3" placeholder="https://exemplo.com/imagem1.jpg"></textarea>
+                        <div class="invalid-feedback" id="editImagesError"></div>
+                        <small class="text-muted">Digite uma URL por linha. URLs devem começar com http:// ou https://</small>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <button type="submit" class="btn btn-primary">Salvar Alterações</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
 
 <script>
 let products = [];
@@ -267,6 +310,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             
             showAlert('Produto criado com sucesso!', 'success');
+            
+            // ✅ CORREÇÃO: Marca que produto foi criado para forçar refresh na listagem
+            sessionStorage.setItem('productJustCreated', 'true');
             bootstrap.Modal.getInstance(document.getElementById('createProductModal')).hide();
             e.target.reset();
             imagesInput.classList.remove('is-invalid');
@@ -309,11 +355,11 @@ async function loadProducts() {
         params.append('limit', pageSize);
         
         const statusFilter = document.getElementById('statusFilter')?.value;
-        // Por padrão, mostra apenas produtos ativos (se não houver filtro)
+        // ✅ CORREÇÃO: Por padrão, mostra apenas produtos ativos (consistência com prices)
         if (statusFilter) {
             params.append('active', statusFilter);
         } else {
-            // Padrão: mostrar apenas ativos
+            // Padrão: mostrar apenas produtos ativos (mesma lógica da página de prices)
             params.append('active', 'true');
         }
         
@@ -322,9 +368,17 @@ async function loadProducts() {
             params.append('search', search);
         }
         
+        // ✅ CORREÇÃO: Adiciona parâmetro refresh para forçar atualização após criar produto
+        // Se acabou de criar um produto, força refresh
+        const justCreated = sessionStorage.getItem('productJustCreated') === 'true';
+        if (justCreated) {
+            params.append('refresh', 'true');
+            sessionStorage.removeItem('productJustCreated');
+        }
+        
         const url = '/v1/products?' + params.toString();
         const response = await apiRequest(url, {
-            cacheTTL: 15000 // Cache de 15 segundos (produtos mudam pouco)
+            cacheTTL: justCreated ? 0 : 15000 // Sem cache se acabou de criar
         });
         
         products = response.data || [];
@@ -404,6 +458,9 @@ function renderProducts() {
                             <a href="/product-details?id=${product.id}" class="btn btn-sm btn-outline-primary" title="Ver detalhes">
                                 <i class="bi bi-eye"></i>
                             </a>
+                            <button type="button" class="btn btn-sm btn-outline-warning" onclick="editProduct('${product.id}')" title="Editar">
+                                <i class="bi bi-pencil"></i>
+                            </button>
                             <button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteProduct('${product.id}')" title="Excluir">
                                 <i class="bi bi-trash"></i>
                             </button>
@@ -450,6 +507,99 @@ function formatNumber(num) {
 }
 
 
+async function editProduct(productId) {
+    try {
+        // Busca dados do produto
+        const response = await apiRequest(`/v1/products/${productId}`);
+        const product = response.data;
+        
+        // Preenche o formulário
+        document.getElementById('editProductId').value = product.id;
+        document.getElementById('editProductName').value = product.name || '';
+        document.getElementById('editProductDescription').value = product.description || '';
+        document.getElementById('editProductActive').checked = product.active === true;
+        
+        // Preenche imagens (uma por linha)
+        const imagesText = (product.images || []).join('\n');
+        document.getElementById('editProductImages').value = imagesText;
+        
+        // Limpa erros anteriores
+        document.getElementById('editImagesError').textContent = '';
+        document.getElementById('editProductImages').classList.remove('is-invalid');
+        
+        // Abre o modal
+        const modal = new bootstrap.Modal(document.getElementById('editProductModal'));
+        modal.show();
+    } catch (error) {
+        console.error('Erro ao carregar produto:', error);
+        showAlert(error.message || 'Erro ao carregar dados do produto', 'danger');
+    }
+}
+
+// Handler do formulário de edição
+document.getElementById('editProductForm')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const formData = new FormData(e.target);
+    const productId = formData.get('id');
+    
+    // Valida imagens
+    const imagesInput = document.getElementById('editProductImages');
+    const imagesText = imagesInput.value.trim();
+    const imagesError = document.getElementById('editImagesError');
+    
+    let images = [];
+    if (imagesText) {
+        const imageUrls = imagesText.split('\n').map(url => url.trim()).filter(url => url);
+        const invalidUrls = imageUrls.filter(url => !url.match(/^https?:\/\//));
+        
+        if (invalidUrls.length > 0) {
+            imagesInput.classList.add('is-invalid');
+            imagesError.textContent = 'Todas as URLs devem começar com http:// ou https://';
+            return;
+        }
+        
+        if (imageUrls.length > 20) {
+            imagesInput.classList.add('is-invalid');
+            imagesError.textContent = 'Máximo de 20 imagens permitidas';
+            return;
+        }
+        
+        images = imageUrls;
+    }
+    
+    const data = {
+        name: formData.get('name'),
+        description: formData.get('description') || null,
+        active: formData.get('active') === 'on',
+        images: images.length > 0 ? images : null
+    };
+    
+    try {
+        const response = await apiRequest(`/v1/products/${productId}`, {
+            method: 'PUT',
+            body: JSON.stringify(data)
+        });
+        
+        // Limpa cache após editar produto
+        if (typeof cache !== 'undefined' && cache.clear) {
+            cache.clear('/v1/products');
+        }
+        
+        // ✅ CORREÇÃO: Marca que produto foi editado para forçar refresh na listagem
+        sessionStorage.setItem('productJustCreated', 'true');
+        
+        showAlert('Produto atualizado com sucesso!', 'success');
+        bootstrap.Modal.getInstance(document.getElementById('editProductModal')).hide();
+        e.target.reset();
+        imagesInput.classList.remove('is-invalid');
+        imagesError.textContent = '';
+        loadProducts();
+    } catch (error) {
+        showAlert(error.message, 'danger');
+    }
+});
+
 async function deleteProduct(productId) {
     const confirmed = await showConfirmModal(
         'Tem certeza que deseja remover este produto? Esta ação não pode ser desfeita.',
@@ -467,6 +617,9 @@ async function deleteProduct(productId) {
         if (typeof cache !== 'undefined' && cache.clear) {
             cache.clear('/v1/products');
         }
+        
+        // ✅ CORREÇÃO: Marca que produto foi deletado para forçar refresh na listagem
+        sessionStorage.setItem('productJustCreated', 'true');
         
         // Verifica se foi deletado ou apenas desativado
         const wasDeleted = response.data?.deleted === true;

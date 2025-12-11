@@ -188,6 +188,29 @@ function updateStats(subscriptions) {
     document.getElementById('trialSubscriptions').textContent = formatNumber(trialing);
 }
 
+// ✅ CORREÇÃO: Função local para formatar moeda sem dividir por 100 (valor já vem em reais)
+function formatCurrencyReais(amount, currency = 'BRL') {
+    if (!amount && amount !== 0) return '-';
+    
+    const currencyMap = {
+        'BRL': 'pt-BR',
+        'USD': 'en-US',
+        'EUR': 'de-DE',
+        'GBP': 'en-GB'
+    };
+    
+    const locale = currencyMap[currency?.toUpperCase()] || 'pt-BR';
+    const currencyCode = currency?.toUpperCase() || 'BRL';
+    
+    // Garante que é um número e não divide novamente
+    const finalAmount = parseFloat(amount);
+    
+    return new Intl.NumberFormat(locale, {
+        style: 'currency',
+        currency: currencyCode
+    }).format(finalAmount);
+}
+
 function renderHistory(subscriptions) {
     const tbody = document.getElementById('historyTableBody');
     const emptyState = document.getElementById('emptyState');
@@ -224,20 +247,31 @@ function renderHistory(subscriptions) {
             'incomplete_expired': 'Incompleta Expirada'
         }[sub.status] || sub.status || '-';
         
+        // ✅ CORREÇÃO: Prioriza customer_name (retornado pelo backend para SaaS admins)
+        const customerName = sub.customer_name || sub.customer?.name || sub.customer_id || '-';
+        const customerId = sub.customer_id || sub.customer?.id || null;
+        const customerDisplay = customerName !== '-' ? 
+            `<a href="/customer-details?id=${customerId || customerName}" class="text-decoration-none">${escapeHtml(customerName)}</a>` :
+            escapeHtml(customerName);
+        
+        // ✅ CORREÇÃO: Usa stripe_subscription_id ou id para o link
+        const subscriptionId = sub.stripe_subscription_id || sub.id;
+        
         return `
             <tr>
                 <td>
-                    <code class="text-muted small">${escapeHtml(sub.id)}</code>
+                    <code class="text-muted small">${escapeHtml(subscriptionId)}</code>
                 </td>
                 <td>
-                    <div>${escapeHtml(sub.customer_id || sub.customer?.name || '-')}</div>
+                    <div>${customerDisplay}</div>
+                    ${customerId && customerId !== customerName ? `<small class="text-muted">ID: ${escapeHtml(customerId)}</small>` : ''}
                 </td>
                 <td>
                     <span class="badge ${statusBadge}">${statusText}</span>
                 </td>
                 <td>
                     <div class="fw-bold text-success">
-                        ${sub.amount ? formatCurrency(sub.amount, sub.currency || 'BRL') : '-'}
+                        ${sub.amount !== undefined && sub.amount !== null ? formatCurrencyReais(sub.amount, sub.currency || 'BRL') : '-'}
                     </div>
                 </td>
                 <td>
@@ -248,7 +282,7 @@ function renderHistory(subscriptions) {
                 </td>
                 <td>
                     <div class="btn-group" role="group">
-                        <a href="/subscription-details?id=${sub.id}" class="btn btn-sm btn-outline-primary" title="Ver detalhes">
+                        <a href="/subscription-details?id=${subscriptionId}" class="btn btn-sm btn-outline-primary" title="Ver detalhes">
                             <i class="bi bi-eye"></i>
                         </a>
                     </div>

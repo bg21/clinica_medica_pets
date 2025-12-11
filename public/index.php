@@ -305,7 +305,8 @@ $app->before('start', function() use ($app) {
     $publicRoutes = [
         '/', '/v1/webhook', '/health', '/health/detailed', 
         '/v1/auth/login', '/v1/auth/register', '/v1/auth/register-employee', '/v1/auth/csrf-token', // Rotas de autenticação públicas
-            '/login', '/register',
+        '/v1/saas-admin/login', '/v1/saas-admin/logout', // Rotas de login de administradores SaaS
+            '/login', '/register', '/saas-admin/login', // Rotas de view de login
             '/index', '/checkout', '/success', '/cancel', '/api-docs', '/api-docs/ui',
             '/subscription-required', '/stripe-connect/success',
         // Rotas autenticadas (serão verificadas individualmente via getAuthenticatedUserData())
@@ -319,7 +320,9 @@ $app->before('start', function() use ($app) {
         // Rotas de administração (verificam autenticação individualmente)
         '/traces', '/performance-metrics',
         // Rotas de Clínica Veterinária (verificam autenticação individualmente)
-        '/clinic/dashboard', '/clinic/pets', '/clinic/professionals', '/clinic/specialties', '/clinic/professional-schedule', '/clinic/appointments', '/clinic/exams', '/clinic/budgets', '/clinic/commissions', '/clinic/reports', '/clinic/search', '/schedule', '/clinic-settings'
+        '/clinic/dashboard', '/clinic/pets', '/clinic/professionals', '/clinic/specialties', '/clinic/professional-schedule', '/clinic/appointments', '/clinic/exams', '/clinic/budgets', '/clinic/commissions', '/clinic/reports', '/clinic/search', '/schedule', '/clinic-settings',
+        // ✅ CORREÇÃO: Rota de métricas Stripe (view - verifica autenticação individualmente)
+        '/stripe-metrics'
     ];
     $requestUri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
     
@@ -328,6 +331,20 @@ $app->before('start', function() use ($app) {
         return;
     }
     
+    // ✅ CORREÇÃO: Rotas de view (não começam com /v1/) não precisam de header Authorization
+    // Elas usam getAuthenticatedUserData() internamente que pode ler de cookie ou query string
+    if (strpos($requestUri, '/v1/') !== 0) {
+        // É uma rota de view, não de API - permite passar (a rota verificará autenticação internamente)
+        // Rotas públicas já estão na lista e serão permitidas
+        if (in_array($requestUri, $publicRoutes) || strpos($requestUri, '/api-docs') === 0) {
+            return;
+        }
+        // Se não está na lista de públicas, mas é uma view, permite passar
+        // (a rota verificará autenticação via getAuthenticatedUserData())
+        return;
+    }
+    
+    // Para rotas de API (/v1/*), verifica se está na lista de públicas
     if (in_array($requestUri, $publicRoutes) || strpos($requestUri, '/api-docs') === 0) {
         return;
     }
@@ -375,7 +392,10 @@ $app->before('start', function() use ($app) {
         // ✅ SEGURANÇA: Não expõe informações sensíveis mesmo em desenvolvimento
         $debug = Config::isDevelopment() ? [
             'server_keys_count' => count(array_keys($_SERVER)),
-            'has_authorization' => isset($_SERVER['HTTP_AUTHORIZATION'])
+            'has_authorization' => isset($_SERVER['HTTP_AUTHORIZATION']),
+            'request_uri' => $requestUri,
+            'request_method' => $_SERVER['REQUEST_METHOD'] ?? 'UNKNOWN',
+            'all_headers_keys' => function_exists('getallheaders') ? array_keys(getallheaders() ?? []) : []
         ] : null;
         $app->json(['error' => 'Token de autenticação não fornecido', 'debug' => $debug], 401);
         $app->stop();
@@ -397,7 +417,16 @@ $app->before('start', function() use ($app) {
     
     if ($cachedAuth !== null) {
         // Usa dados do cache
-        if (isset($cachedAuth['user_id'])) {
+        if (isset($cachedAuth['saas_admin_id'])) {
+            // Autenticação via Session ID de administrador SaaS
+            Flight::set('saas_admin_id', (int)$cachedAuth['saas_admin_id']);
+            Flight::set('saas_admin_email', $cachedAuth['saas_admin_email']);
+            Flight::set('saas_admin_name', $cachedAuth['saas_admin_name']);
+            Flight::set('is_saas_admin', true);
+            Flight::set('is_user_auth', false);
+            Flight::set('is_master', false);
+            Flight::set('tenant_id', null);
+        } elseif (isset($cachedAuth['user_id'])) {
             // Autenticação via Session ID (usuário)
             Flight::set('user_id', (int)$cachedAuth['user_id']);
             Flight::set('user_role', $cachedAuth['user_role'] ?? 'viewer');
@@ -407,18 +436,49 @@ $app->before('start', function() use ($app) {
             Flight::set('tenant_name', $cachedAuth['tenant_name']);
             Flight::set('is_user_auth', true);
             Flight::set('is_master', false);
+            Flight::set('is_saas_admin', false);
         } else {
             // Autenticação via API Key (tenant)
             Flight::set('tenant_id', (int)$cachedAuth['tenant_id']);
             Flight::set('tenant', $cachedAuth['tenant'] ?? null);
             Flight::set('is_master', $cachedAuth['is_master'] ?? false);
             Flight::set('is_user_auth', false);
+            Flight::set('is_saas_admin', false);
         }
         return;
     }
     
     // Se não há cache, valida normalmente
-    // Tenta primeiro como Session ID (usuário autenticado)
+    // Tenta primeiro como Session ID de administrador SaaS
+    $saasAdminSessionModel = new \App\Models\SaasAdminSession();
+    $saasAdminSession = $saasAdminSessionModel->validate($token);
+    
+    if ($saasAdminSession) {
+        // Autenticação via Session ID de administrador SaaS
+        $authData = [
+            'saas_admin_id' => (int)$saasAdminSession['admin_id'],
+            'saas_admin_email' => $saasAdminSession['email'],
+            'saas_admin_name' => $saasAdminSession['name'],
+            'is_saas_admin' => true,
+            'is_user_auth' => false,
+            'is_master' => false,
+            'tenant_id' => null
+        ];
+        
+        Flight::set('saas_admin_id', $authData['saas_admin_id']);
+        Flight::set('saas_admin_email', $authData['saas_admin_email']);
+        Flight::set('saas_admin_name', $authData['saas_admin_name']);
+        Flight::set('is_saas_admin', true);
+        Flight::set('is_user_auth', false);
+        Flight::set('is_master', false);
+        Flight::set('tenant_id', null);
+        
+        // ✅ Salva no cache
+        \App\Services\CacheService::setJson($cacheKey, $authData, 300);
+        return;
+    }
+    
+    // Se não é admin SaaS, tenta como Session ID (usuário autenticado)
     $userSessionModel = new \App\Models\UserSession();
     $session = $userSessionModel->validate($token);
     
@@ -432,7 +492,8 @@ $app->before('start', function() use ($app) {
             'tenant_id' => (int)$session['tenant_id'],
             'tenant_name' => $session['tenant_name'],
             'is_user_auth' => true,
-            'is_master' => false
+            'is_master' => false,
+            'is_saas_admin' => false
         ];
         
         Flight::set('user_id', $authData['user_id']);
@@ -443,6 +504,7 @@ $app->before('start', function() use ($app) {
         Flight::set('tenant_name', $authData['tenant_name']);
         Flight::set('is_user_auth', true);
         Flight::set('is_master', false);
+        Flight::set('is_saas_admin', false);
         
         // ✅ Salva no cache
         \App\Services\CacheService::setJson($cacheKey, $authData, 300);
@@ -742,6 +804,9 @@ $auditLogController = $container->make(\App\Controllers\AuditLogController::clas
 $performanceController = $container->make(\App\Controllers\PerformanceController::class);
 $healthCheckController = $container->make(\App\Controllers\HealthCheckController::class);
 $swaggerController = $container->make(\App\Controllers\SwaggerController::class);
+$stripeMetricsController = $container->make(\App\Controllers\StripeMetricsController::class);
+$planLimitsController = $container->make(\App\Controllers\PlanLimitsController::class);
+$adminPlansController = new \App\Controllers\AdminPlansController();
 
 // Rota raiz - informações da API
 $app->route('GET /', function() use ($app) {
@@ -828,6 +893,7 @@ $app->route('GET /v1/customers/@id/payment-methods', [$customerController, 'list
 $app->route('PUT /v1/customers/@id/payment-methods/@pm_id', [$customerController, 'updatePaymentMethod']);
 $app->route('DELETE /v1/customers/@id/payment-methods/@pm_id', [$customerController, 'deletePaymentMethod']);
 $app->route('POST /v1/customers/@id/payment-methods/@pm_id/set-default', [$customerController, 'setDefaultPaymentMethod']);
+$app->route('POST /v1/customers/@id/payment-methods/remove-expired', [$customerController, 'removeExpiredPaymentMethods']);
 
 // Rotas de checkout
 $app->route('POST /v1/checkout', [$checkoutController, 'create']);
@@ -840,16 +906,51 @@ $app->route('POST /v1/saas/checkout', [$saasController, 'createCheckout']);
 // Rotas Stripe Connect
 $app->route('POST /v1/stripe-connect/onboarding', [$stripeConnectController, 'createOnboarding']);
 $app->route('GET /v1/stripe-connect/account', [$stripeConnectController, 'getAccount']);
+$app->route('POST /v1/stripe-connect/api-key', [$stripeConnectController, 'saveApiKey']);
+$app->route('POST /v1/stripe-connect/login-link', [$stripeConnectController, 'createLoginLink']);
+$app->route('GET /v1/stripe-connect/balance', [$stripeConnectController, 'getBalance']);
+$app->route('GET /v1/stripe-connect/transfers', [$stripeConnectController, 'listTransfers']);
 
 // Rotas de assinaturas
 $app->route('POST /v1/subscriptions', [$subscriptionController, 'create']);
 $app->route('GET /v1/subscriptions', [$subscriptionController, 'list']);
+$app->route('GET /v1/subscriptions/current', [$subscriptionController, 'getCurrent']);
 $app->route('GET /v1/subscriptions/@id', [$subscriptionController, 'get']);
 $app->route('PUT /v1/subscriptions/@id', [$subscriptionController, 'update']);
 $app->route('DELETE /v1/subscriptions/@id', [$subscriptionController, 'cancel']);
 $app->route('POST /v1/subscriptions/@id/reactivate', [$subscriptionController, 'reactivate']);
+$app->route('POST /v1/subscriptions/@id/schedule-plan-change', [$subscriptionController, 'schedulePlanChange']);
+$app->route('POST /v1/subscriptions/@id/pause', [$subscriptionController, 'pause']);
+$app->route('POST /v1/subscriptions/@id/resume', [$subscriptionController, 'resume']);
 $app->route('GET /v1/subscriptions/@id/history', [$subscriptionController, 'history']);
 $app->route('GET /v1/subscriptions/@id/history/stats', [$subscriptionController, 'historyStats']);
+
+// Rotas de Limites de Planos e Módulos
+$app->route('GET /v1/plan-limits', [$planLimitsController, 'getAll']);
+$app->route('GET /v1/plan-limits/plans', [$planLimitsController, 'getAllPlans']);
+$app->route('GET /v1/plan-limits/modules', [$planLimitsController, 'getAvailableModules']);
+$app->route('GET /v1/plan-limits/check-module/@moduleId', [$planLimitsController, 'checkModule']);
+
+// Rotas de Administradores do SaaS
+$saasAdminController = new \App\Controllers\SaasAdminController();
+$app->route('POST /v1/saas-admin/login', [$saasAdminController, 'login']);
+$app->route('POST /v1/saas-admin/logout', [$saasAdminController, 'logout']);
+$app->route('GET /v1/saas-admin/admins', [$saasAdminController, 'listAdmins']);
+$app->route('POST /v1/saas-admin/admins', [$saasAdminController, 'createAdmin']);
+$app->route('PUT /v1/saas-admin/admins/@id', [$saasAdminController, 'updateAdmin']);
+$app->route('DELETE /v1/saas-admin/admins/@id', [$saasAdminController, 'deleteAdmin']);
+
+// Rotas Administrativas - Gerenciar Planos e Módulos
+$adminPlansController = new \App\Controllers\AdminPlansController();
+$app->route('GET /v1/admin/plans', [$adminPlansController, 'listPlans']);
+$app->route('GET /v1/admin/plans/@id', [$adminPlansController, 'getPlan']);
+$app->route('POST /v1/admin/plans', [$adminPlansController, 'createPlan']);
+$app->route('PUT /v1/admin/plans/@id', [$adminPlansController, 'updatePlan']);
+$app->route('DELETE /v1/admin/plans/@id', [$adminPlansController, 'deletePlan']);
+$app->route('GET /v1/admin/modules', [$adminPlansController, 'listModules']);
+$app->route('POST /v1/admin/modules', [$adminPlansController, 'createModule']);
+$app->route('PUT /v1/admin/modules/@id', [$adminPlansController, 'updateModule']);
+$app->route('DELETE /v1/admin/modules/@id', [$adminPlansController, 'deleteModule']);
 
 // Rota de webhook
 $app->route('POST /v1/webhook', [$webhookController, 'handle']);
@@ -858,6 +959,7 @@ $app->route('POST /v1/webhook', [$webhookController, 'handle']);
 $app->route('POST /v1/billing-portal', [$billingPortalController, 'create']);
 
 // Rotas de faturas
+$app->route('GET /v1/invoices', [$invoiceController, 'list']);
 $app->route('GET /v1/invoices/@id', [$invoiceController, 'get']);
 
 // Rotas de preços
@@ -962,6 +1064,15 @@ $app->route('GET /v1/reports/payments', [$reportController, 'payments']);
 $app->route('GET /v1/reports/mrr', [$reportController, 'mrr']);
 $app->route('GET /v1/reports/arr', [$reportController, 'arr']);
 
+// ✅ NOVO: Rotas de Métricas Stripe
+$app->route('GET /v1/stripe-metrics', [$stripeMetricsController, 'getAll']);
+$app->route('GET /v1/stripe-metrics/mrr', [$stripeMetricsController, 'getMRR']);
+$app->route('GET /v1/stripe-metrics/churn', [$stripeMetricsController, 'getChurn']);
+$app->route('GET /v1/stripe-metrics/conversion', [$stripeMetricsController, 'getConversion']);
+$app->route('GET /v1/stripe-metrics/arr', [$stripeMetricsController, 'getARR']);
+$app->route('GET /v1/stripe-metrics/alerts', [$stripeMetricsController, 'getAlerts']);
+$app->route('GET /v1/stripe-metrics/critical-failures', [$stripeMetricsController, 'getCriticalFailures']);
+
 // Rota de página de login (HTML)
 $app->route('GET /login', function() use ($app) {
     // Detecta URL base automaticamente
@@ -984,6 +1095,30 @@ $app->route('GET /login', function() use ($app) {
     
     // Renderiza a view
     \App\Utils\View::render('login', ['apiUrl' => $apiUrl]);
+});
+
+// Rota de página de login para administradores SaaS (master)
+$app->route('GET /saas-admin/login', function() use ($app) {
+    // Detecta URL base automaticamente
+    $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    $scriptName = dirname($_SERVER['SCRIPT_NAME']);
+    
+    // Remove query string e fragmentos da URL
+    $requestUri = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
+    $basePath = dirname($requestUri);
+    
+    // Constrói URL base
+    if ($scriptName === '/' || $scriptName === '\\') {
+        $baseUrl = $protocol . '://' . $host;
+    } else {
+        $baseUrl = $protocol . '://' . $host . rtrim($scriptName, '/');
+    }
+    
+    $apiUrl = rtrim($baseUrl, '/');
+    
+    // Renderiza a view de login de administrador SaaS
+    \App\Utils\View::render('saas-admin-login', ['apiUrl' => $apiUrl]);
 });
 
 // Helper para obter dados do usuário autenticado
@@ -1019,28 +1154,123 @@ function getAuthenticatedUserData() {
         $sessionId = $_GET['session_id'];
     }
     
+    // Tenta obter session_id de administrador SaaS (cookie ou query string)
+    $saasAdminSessionId = null;
+    if (isset($_COOKIE['saas_admin_session_id'])) {
+        $saasAdminSessionId = $_COOKIE['saas_admin_session_id'];
+    } elseif (isset($_GET['saas_admin_session_id'])) {
+        $saasAdminSessionId = $_GET['saas_admin_session_id'];
+    }
+    
     $user = null;
     $tenant = null;
     
-    if ($sessionId) {
-        $userSessionModel = new \App\Models\UserSession();
-        $session = $userSessionModel->validate($sessionId);
+    // Prioriza verificação de administrador SaaS se houver session_id específico
+    if ($saasAdminSessionId) {
+        $saasAdminSessionModel = new \App\Models\SaasAdminSession();
+        $saasAdminSession = $saasAdminSessionModel->validate($saasAdminSessionId);
         
-        if ($session) {
+        if ($saasAdminSession) {
+            // É um administrador SaaS
             $user = [
-                'id' => (int)$session['user_id'],
-                'email' => $session['email'],
-                'name' => $session['name'],
-                'role' => $session['role'] ?? 'viewer'
+                'id' => (int)$saasAdminSession['admin_id'],
+                'email' => $saasAdminSession['email'],
+                'name' => $saasAdminSession['name'],
+                'role' => 'saas_admin',
+                'is_saas_admin' => true
             ];
-            $tenant = [
-                'id' => (int)$session['tenant_id'],
-                'name' => $session['tenant_name']
+            $tenant = null; // Administradores SaaS não têm tenant
+            Flight::set('is_saas_admin', true);
+            Flight::set('saas_admin_id', (int)$saasAdminSession['admin_id']);
+            return [$user, $tenant, $saasAdminSessionId];
+        }
+    }
+    
+    // Se não é admin SaaS, tenta verificar sessão normal
+    if ($sessionId) {
+        // Primeiro tenta verificar se é sessão de administrador SaaS (caso sessionId seja usado para ambos)
+        $saasAdminSessionModel = new \App\Models\SaasAdminSession();
+        $saasAdminSession = $saasAdminSessionModel->validate($sessionId);
+        
+        if ($saasAdminSession) {
+            // É um administrador SaaS
+            $user = [
+                'id' => (int)$saasAdminSession['admin_id'],
+                'email' => $saasAdminSession['email'],
+                'name' => $saasAdminSession['name'],
+                'role' => 'saas_admin',
+                'is_saas_admin' => true
             ];
+            $tenant = null; // Administradores SaaS não têm tenant
+            Flight::set('is_saas_admin', true);
+            Flight::set('saas_admin_id', (int)$saasAdminSession['admin_id']);
+        } else {
+            // Tenta verificar se é sessão de usuário normal
+            $userSessionModel = new \App\Models\UserSession();
+            $session = $userSessionModel->validate($sessionId);
+            
+            if ($session) {
+                $user = [
+                    'id' => (int)$session['user_id'],
+                    'email' => $session['email'],
+                    'name' => $session['name'],
+                    'role' => $session['role'] ?? 'viewer',
+                    'is_saas_admin' => false
+                ];
+                $tenant = [
+                    'id' => (int)$session['tenant_id'],
+                    'name' => $session['tenant_name']
+                ];
+                Flight::set('is_saas_admin', false);
+            }
         }
     }
     
     return [$user, $tenant, $sessionId];
+}
+
+// Helper para verificar se é administrador SaaS e mostrar view de não disponível
+function checkSaasAdminAndRender($user, $apiUrl, $tenant, $title, $currentPage, $viewName, $isClinicFeature = true) {
+    if ($user && ($user['is_saas_admin'] ?? false)) {
+        $viewToRender = $isClinicFeature ? 'clinic-not-available' : 'not-available-for-saas';
+        \App\Utils\View::render($viewToRender, [
+            'apiUrl' => $apiUrl,
+            'user' => $user,
+            'tenant' => $tenant,
+            'title' => $title . ' - Não Disponível',
+            'currentPage' => $currentPage
+        ], true);
+        return true;
+    }
+    return false;
+}
+
+// Helper para verificar acesso a módulo e mostrar view de não disponível se necessário
+function checkModuleAccessAndRender($user, $apiUrl, $tenant, $title, $currentPage, $moduleId) {
+    $tenantId = $tenant['id'] ?? null;
+    if (!$tenantId) {
+        return false; // Deixa outros middlewares tratarem
+    }
+
+    $moduleMiddleware = new \App\Middleware\ModuleAccessMiddleware();
+    $check = $moduleMiddleware->check($moduleId);
+    
+    if ($check) {
+        // Módulo não disponível - mostra página de upgrade
+        \App\Utils\View::render('module-not-available', [
+            'apiUrl' => $apiUrl,
+            'user' => $user,
+            'tenant' => $tenant,
+            'title' => 'Módulo Não Disponível',
+            'currentPage' => $currentPage,
+            'moduleName' => $check['module_name'] ?? ucfirst($moduleId),
+            'currentPlan' => $check['current_plan'] ?? 'seu plano atual',
+            'upgradeUrl' => $check['upgrade_url'] ?? '/my-subscription'
+        ], true);
+        return true;
+    }
+    
+    return false;
 }
 
 // Helper para detectar URL base
@@ -1082,6 +1312,11 @@ $app->route('GET /customers', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
     
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
     \App\Utils\View::render('customers', [
         'apiUrl' => $apiUrl,
         'user' => $user,
@@ -1095,6 +1330,11 @@ $app->route('GET /customers', function() use ($app) {
 $app->route('GET /subscriptions', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
     
     \App\Utils\View::render('subscriptions', [
         'apiUrl' => $apiUrl,
@@ -1110,6 +1350,11 @@ $app->route('GET /products', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
     
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
     \App\Utils\View::render('products', [
         'apiUrl' => $apiUrl,
         'user' => $user,
@@ -1124,6 +1369,11 @@ $app->route('GET /prices', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
     
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
     \App\Utils\View::render('prices', [
         'apiUrl' => $apiUrl,
         'user' => $user,
@@ -1137,6 +1387,11 @@ $app->route('GET /prices', function() use ($app) {
 $app->route('GET /reports', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
     
     \App\Utils\View::render('reports', [
         'apiUrl' => $apiUrl,
@@ -1243,6 +1498,26 @@ $app->route('GET /performance-metrics', function() use ($app) {
     ], true);
 });
 
+// ✅ NOVO: Rota de dashboard de métricas Stripe (requer permissão)
+$app->route('GET /stripe-metrics', function() use ($app) {
+    [$user, $tenant, $sessionId] = getAuthenticatedUserData();
+    $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
+    // Verifica permissão (será verificado no frontend também)
+    \App\Utils\View::render('stripe-metrics', [
+        'apiUrl' => $apiUrl,
+        'user' => $user,
+        'tenant' => $tenant,
+        'title' => 'Dashboard de Métricas Stripe',
+        'currentPage' => 'stripe-metrics'
+    ], true);
+});
+
 // Rotas de Clínica Veterinária (Views)
 $app->route('GET /clinic/pets', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
@@ -1251,6 +1526,15 @@ $app->route('GET /clinic/pets', function() use ($app) {
     if (!$user) {
         header('Location: /login');
         exit;
+    }
+    
+    if (checkSaasAdminAndRender($user, $apiUrl, $tenant, 'Pets', 'clinic-pets', 'clinic/pets')) {
+        return;
+    }
+    
+    // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "pets"
+    if (checkModuleAccessAndRender($user, $apiUrl, $tenant, 'Pets', 'clinic-pets', 'pets')) {
+        return;
     }
     
     \App\Utils\View::render('clinic/pets', [
@@ -1271,6 +1555,10 @@ $app->route('GET /clinic/professionals', function() use ($app) {
         exit;
     }
     
+    if (checkSaasAdminAndRender($user, $apiUrl, $tenant, 'Profissionais', 'clinic-professionals', 'clinic/professionals')) {
+        return;
+    }
+    
     \App\Utils\View::render('clinic/professionals', [
         'apiUrl' => $apiUrl,
         'user' => $user,
@@ -1287,6 +1575,15 @@ $app->route('GET /clinic/appointments', function() use ($app) {
     if (!$user) {
         header('Location: /login');
         exit;
+    }
+    
+    if (checkSaasAdminAndRender($user, $apiUrl, $tenant, 'Agendamentos', 'clinic-appointments', 'clinic/appointments')) {
+        return;
+    }
+    
+    // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "appointments"
+    if (checkModuleAccessAndRender($user, $apiUrl, $tenant, 'Agendamentos', 'clinic-appointments', 'appointments')) {
+        return;
     }
     
     \App\Utils\View::render('clinic/appointments', [
@@ -1307,6 +1604,15 @@ $app->route('GET /clinic/exams', function() use ($app) {
         exit;
     }
     
+    if (checkSaasAdminAndRender($user, $apiUrl, $tenant, 'Exames', 'clinic-exams', 'clinic/exams')) {
+        return;
+    }
+    
+    // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "exams"
+    if (checkModuleAccessAndRender($user, $apiUrl, $tenant, 'Exames', 'clinic-exams', 'exams')) {
+        return;
+    }
+    
     \App\Utils\View::render('clinic/exams', [
         'apiUrl' => $apiUrl,
         'user' => $user,
@@ -1323,6 +1629,15 @@ $app->route('GET /clinic/budgets', function() use ($app) {
     if (!$user) {
         header('Location: /login');
         exit;
+    }
+    
+    if (checkSaasAdminAndRender($user, $apiUrl, $tenant, 'Orçamentos', 'clinic-budgets', 'clinic/budgets')) {
+        return;
+    }
+    
+    // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "financial" (orçamentos fazem parte do financeiro)
+    if (checkModuleAccessAndRender($user, $apiUrl, $tenant, 'Orçamentos', 'clinic-budgets', 'financial')) {
+        return;
     }
     
     \App\Utils\View::render('clinic/budgets', [
@@ -1343,6 +1658,15 @@ $app->route('GET /clinic/commissions', function() use ($app) {
         exit;
     }
     
+    if (checkSaasAdminAndRender($user, $apiUrl, $tenant, 'Comissões', 'clinic-commissions', 'clinic/commissions')) {
+        return;
+    }
+    
+    // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "financial" (comissões fazem parte do financeiro)
+    if (checkModuleAccessAndRender($user, $apiUrl, $tenant, 'Comissões', 'clinic-commissions', 'financial')) {
+        return;
+    }
+    
     \App\Utils\View::render('clinic/commissions', [
         'apiUrl' => $apiUrl,
         'user' => $user,
@@ -1359,6 +1683,10 @@ $app->route('GET /clinic/specialties', function() use ($app) {
     if (!$user) {
         header('Location: /login');
         exit;
+    }
+    
+    if (checkSaasAdminAndRender($user, $apiUrl, $tenant, 'Especialidades', 'clinic-specialties', 'clinic/specialties')) {
+        return;
     }
     
     \App\Utils\View::render('clinic/specialties', [
@@ -1379,6 +1707,10 @@ $app->route('GET /clinic/dashboard', function() use ($app) {
         exit;
     }
     
+    if (checkSaasAdminAndRender($user, $apiUrl, $tenant, 'Dashboard Clínica', 'clinic-dashboard', 'clinic/dashboard')) {
+        return;
+    }
+    
     \App\Utils\View::render('clinic/dashboard', [
         'apiUrl' => $apiUrl,
         'user' => $user,
@@ -1395,6 +1727,15 @@ $app->route('GET /clinic/professional-schedule', function() use ($app) {
     if (!$user) {
         header('Location: /login');
         exit;
+    }
+    
+    if (checkSaasAdminAndRender($user, $apiUrl, $tenant, 'Agenda de Profissionais', 'clinic-professional-schedule', 'clinic/professional-schedule')) {
+        return;
+    }
+    
+    // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "appointments" (agenda de profissionais faz parte de appointments)
+    if (checkModuleAccessAndRender($user, $apiUrl, $tenant, 'Agenda de Profissionais', 'clinic-professional-schedule', 'appointments')) {
+        return;
     }
     
     \App\Utils\View::render('clinic/professional-schedule', [
@@ -1420,7 +1761,8 @@ $app->route('GET /subscription-required', function() use ($app) {
 });
 
 // Rota de escolha de plano (requer autenticação)
-$app->route('GET /choose-plan', function() use ($app) {
+// Rota de Meus Módulos
+$app->route('GET /my-modules', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
     
@@ -1429,11 +1771,57 @@ $app->route('GET /choose-plan', function() use ($app) {
         exit;
     }
     
-    \App\Utils\View::render('choose-plan', [
+    // ✅ CORREÇÃO: Verifica se é SaaS admin e mostra mensagem "Disponível apenas para clínicas"
+    // SaaS admins não têm módulos de plano, eles gerenciam os módulos que vendem. Esta página é para clínicas verem seus módulos.
+    if (checkSaasAdminAndRender($user, $apiUrl, $tenant, 'Meus Módulos', 'my-modules', 'my-modules', true)) {
+        return;
+    }
+    
+    \App\Utils\View::render('my-modules', [
         'apiUrl' => $apiUrl,
         'user' => $user,
-        'tenant' => $tenant
+        'tenant' => $tenant,
+        'title' => 'Meus Módulos',
+        'currentPage' => 'my-modules'
+    ], true);
+});
+
+// Rota Administrativa - Gerenciar Planos e Módulos
+$app->route('GET /admin-plans', function() use ($app) {
+    [$user, $tenant, $sessionId] = getAuthenticatedUserData();
+    $apiUrl = getBaseUrl();
+    
+    // Debug: log dos dados recebidos
+    \App\Services\Logger::debug("Acesso a /admin-plans", [
+        'user' => $user,
+        'tenant' => $tenant,
+        'session_id' => $sessionId ? substr($sessionId, 0, 20) . '...' : null,
+        'is_saas_admin' => $user['is_saas_admin'] ?? false,
+        'flight_is_saas_admin' => Flight::get('is_saas_admin')
     ]);
+    
+    if (!$user) {
+        \App\Services\Logger::warning("Tentativa de acesso a /admin-plans sem autenticação");
+        header('Location: /saas-admin/login');
+        exit;
+    }
+    
+    // Verifica se é administrador SaaS
+    if (!($user['is_saas_admin'] ?? false)) {
+        \App\Services\Logger::warning("Tentativa de acesso a /admin-plans sem ser saas_admin", [
+            'user_role' => $user['role'] ?? 'unknown'
+        ]);
+        $app->json(['error' => 'Acesso negado. Apenas administradores do SaaS podem acessar.'], 403);
+        return;
+    }
+    
+    \App\Utils\View::render('admin-plans', [
+        'apiUrl' => $apiUrl,
+        'user' => $user,
+        'tenant' => $tenant,
+        'title' => 'Gerenciar Planos e Módulos',
+        'currentPage' => 'admin-plans'
+    ], true);
 });
 
 // Rota de sucesso após assinatura (requer autenticação)
@@ -1485,6 +1873,16 @@ $app->route('GET /cancel', function() use ($app) {
 $app->route('GET /schedule', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
+    if (checkSaasAdminAndRender($user, $apiUrl, $tenant, 'Calendário', 'schedule', 'schedule')) {
+        return;
+    }
+    
     \App\Utils\View::render('schedule', [
         'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
         'title' => 'Agenda', 'currentPage' => 'schedule'
@@ -1592,6 +1990,12 @@ $app->route('GET /invoice-details', function() use ($app) {
 $app->route('GET /invoices', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
     \App\Utils\View::render('invoices', [
         'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
         'title' => 'Faturas', 'currentPage' => 'invoices'
@@ -1602,6 +2006,12 @@ $app->route('GET /invoices', function() use ($app) {
 $app->route('GET /refunds', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
     \App\Utils\View::render('refunds', [
         'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
         'title' => 'Reembolsos', 'currentPage' => 'refunds'
@@ -1612,6 +2022,12 @@ $app->route('GET /refunds', function() use ($app) {
 $app->route('GET /coupons', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
     \App\Utils\View::render('coupons', [
         'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
         'title' => 'Cupons', 'currentPage' => 'coupons'
@@ -1622,6 +2038,12 @@ $app->route('GET /coupons', function() use ($app) {
 $app->route('GET /promotion-codes', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
     \App\Utils\View::render('promotion-codes', [
         'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
         'title' => 'Códigos Promocionais', 'currentPage' => 'promotion-codes'
@@ -1642,6 +2064,12 @@ $app->route('GET /settings', function() use ($app) {
 $app->route('GET /subscription-history', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
     \App\Utils\View::render('subscription-history', [
         'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
         'title' => 'Histórico de Assinaturas', 'currentPage' => 'subscriptions'
@@ -1652,6 +2080,12 @@ $app->route('GET /subscription-history', function() use ($app) {
 $app->route('GET /transactions', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
     \App\Utils\View::render('transactions', [
         'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
         'title' => 'Transações', 'currentPage' => 'transactions'
@@ -1672,6 +2106,12 @@ $app->route('GET /transaction-details', function() use ($app) {
 $app->route('GET /disputes', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
     \App\Utils\View::render('disputes', [
         'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
         'title' => 'Disputas', 'currentPage' => 'disputes'
@@ -1682,6 +2122,12 @@ $app->route('GET /disputes', function() use ($app) {
 $app->route('GET /charges', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
     \App\Utils\View::render('charges', [
         'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
         'title' => 'Cobranças', 'currentPage' => 'charges'
@@ -1692,6 +2138,12 @@ $app->route('GET /charges', function() use ($app) {
 $app->route('GET /payouts', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
     \App\Utils\View::render('payouts', [
         'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
         'title' => 'Saques', 'currentPage' => 'payouts'
@@ -1702,6 +2154,12 @@ $app->route('GET /payouts', function() use ($app) {
 $app->route('GET /invoice-items', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
     \App\Utils\View::render('invoice-items', [
         'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
         'title' => 'Itens de Fatura', 'currentPage' => 'invoice-items'
@@ -1712,6 +2170,12 @@ $app->route('GET /invoice-items', function() use ($app) {
 $app->route('GET /tax-rates', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
     \App\Utils\View::render('tax-rates', [
         'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
         'title' => 'Taxas de Imposto', 'currentPage' => 'tax-rates'
@@ -1722,6 +2186,12 @@ $app->route('GET /tax-rates', function() use ($app) {
 $app->route('GET /payment-methods', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
     \App\Utils\View::render('payment-methods', [
         'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
         'title' => 'Métodos de Pagamento', 'currentPage' => 'payment-methods'
@@ -1732,9 +2202,40 @@ $app->route('GET /payment-methods', function() use ($app) {
 $app->route('GET /billing-portal', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
     \App\Utils\View::render('billing-portal', [
         'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
         'title' => 'Portal de Cobrança', 'currentPage' => 'billing-portal'
+    ], true);
+});
+
+// Rota de Minha Assinatura (para o tenant gerenciar sua própria assinatura)
+$app->route('GET /my-subscription', function() use ($app) {
+    [$user, $tenant, $sessionId] = getAuthenticatedUserData();
+    $apiUrl = getBaseUrl();
+    
+    if (!$user) {
+        header('Location: /login');
+        exit;
+    }
+    
+    // ✅ CORREÇÃO: Verifica se é SaaS admin e mostra mensagem "Disponível apenas para clínicas"
+    // SaaS admins não assinam planos, eles vendem planos. Esta página é para clínicas gerenciarem suas assinaturas.
+    if (checkSaasAdminAndRender($user, $apiUrl, $tenant, 'Minha Assinatura', 'my-subscription', 'my-subscription', true)) {
+        return;
+    }
+    
+    \App\Utils\View::render('my-subscription', [
+        'apiUrl' => $apiUrl,
+        'user' => $user,
+        'tenant' => $tenant,
+        'title' => 'Minha Assinatura',
+        'currentPage' => 'my-subscription'
     ], true);
 });
 
@@ -1799,6 +2300,8 @@ $app->route('GET /v1/clinic/appointments/pet/@pet_id', [$appointmentController, 
 $app->route('GET /v1/clinic/appointments/professional/@professional_id', [$appointmentController, 'listByProfessional']);
 $app->route('POST /v1/clinic/appointments/@id/pay', [$appointmentController, 'pay']);
 $app->route('GET /v1/clinic/appointments/@id/invoice', [$appointmentController, 'getInvoice']);
+$app->route('POST /v1/clinic/appointments/@id/confirm', [$appointmentController, 'confirm']);
+$app->route('POST /v1/clinic/appointments/@id/complete', [$appointmentController, 'complete']);
 
 // Rotas de Exames
 $examController = $container->make(\App\Controllers\ExamController::class);
@@ -1884,8 +2387,12 @@ $app->route('GET /clinic/reports', function() use ($app) {
     [$user, $tenant, $sessionId] = getAuthenticatedUserData();
     $apiUrl = getBaseUrl();
     
-    if (!$user || !$tenant) {
+    if (!$user) {
         Flight::redirect('/login');
+        return;
+    }
+    
+    if (checkSaasAdminAndRender($user, $apiUrl, $tenant, 'Relatórios Clínica', 'clinic-reports', 'clinic/reports')) {
         return;
     }
     
@@ -1905,6 +2412,10 @@ $app->route('GET /clinic/search', function() use ($app) {
         exit;
     }
     
+    if (checkSaasAdminAndRender($user, $apiUrl, $tenant, 'Busca Avançada', 'clinic-search', 'clinic/search')) {
+        return;
+    }
+    
     \App\Utils\View::render('clinic/search', [
         'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
         'title' => 'Busca Avançada', 'currentPage' => 'clinic-search'
@@ -1921,9 +2432,45 @@ $app->route('GET /clinic-settings', function() use ($app) {
         exit;
     }
     
+    if (checkSaasAdminAndRender($user, $apiUrl, $tenant, 'Configurações da Clínica', 'clinic-settings', 'clinic-settings')) {
+        return;
+    }
+    
     \App\Utils\View::render('clinic-settings', [
         'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
         'title' => 'Configurações da Clínica', 'currentPage' => 'clinic-settings'
+    ], true);
+});
+
+// View de Stripe Connect
+$app->route('GET /stripe-connect', function() use ($app) {
+    [$user, $tenant, $sessionId] = getAuthenticatedUserData();
+    $apiUrl = getBaseUrl();
+    
+    if (!$user || !$tenant) {
+        Flight::redirect('/login');
+        return;
+    }
+    
+    \App\Utils\View::render('stripe-connect', [
+        'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
+        'title' => 'Conectar Stripe', 'currentPage' => 'stripe-connect'
+    ], true);
+});
+
+// View de Sucesso do Stripe Connect
+$app->route('GET /stripe-connect/success', function() use ($app) {
+    [$user, $tenant, $sessionId] = getAuthenticatedUserData();
+    $apiUrl = getBaseUrl();
+    
+    if (!$user || !$tenant) {
+        Flight::redirect('/login');
+        return;
+    }
+    
+    \App\Utils\View::render('stripe-connect-success', [
+        'apiUrl' => $apiUrl, 'user' => $user, 'tenant' => $tenant,
+        'title' => 'Stripe Conectado com Sucesso', 'currentPage' => 'stripe-connect'
     ], true);
 });
 

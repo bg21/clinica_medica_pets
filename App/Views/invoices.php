@@ -157,33 +157,122 @@ document.addEventListener('DOMContentLoaded', () => {
 
 let invoices = [];
 
+// ✅ CORREÇÃO: Função local para formatar moeda sem dividir por 100 (valor já vem em reais)
+function formatCurrencyReais(value, currency = 'BRL') {
+    if (!value && value !== 0) return '-';
+    
+    const currencyMap = {
+        'BRL': 'pt-BR',
+        'USD': 'en-US',
+        'EUR': 'de-DE',
+        'GBP': 'en-GB'
+    };
+    
+    const locale = currencyMap[currency?.toUpperCase()] || 'pt-BR';
+    const currencyCode = currency?.toUpperCase() || 'BRL';
+    
+    // ✅ CORREÇÃO: O valor já vem em reais do backend (não divide por 100)
+    const finalAmount = parseFloat(value);
+    
+    return new Intl.NumberFormat(locale, {
+        style: 'currency',
+        currency: currencyCode
+    }).format(finalAmount);
+}
+
 async function loadInvoices() {
     try {
         document.getElementById('loadingInvoices').style.display = 'block';
         document.getElementById('invoicesList').style.display = 'none';
         
-        // Nota: Esta view precisa de um endpoint para listar todas as faturas
-        // Por enquanto, mostra mensagem informativa
-        const emptyState = document.getElementById('emptyState');
-        const tbody = document.getElementById('invoicesTableBody');
-        const countBadge = document.getElementById('invoicesCountBadge');
+        const statusFilter = document.getElementById('statusFilter')?.value || '';
+        const params = new URLSearchParams();
+        if (statusFilter) {
+            params.append('status', statusFilter);
+        }
+        params.append('limit', '50');
         
-        invoices = [];
+        const response = await apiRequest(`/v1/invoices?${params.toString()}`);
+        invoices = response.data || [];
+        
+        renderInvoices(invoices);
         
         // Atualiza estatísticas
         const stats = calculateInvoiceStats();
         updateInvoiceStats(stats);
         
-        if (countBadge) countBadge.textContent = '0';
-        tbody.innerHTML = '';
-        emptyState.style.display = 'block';
-        
     } catch (error) {
-        showAlert('Erro: ' + error.message, 'danger');
+        console.error('Erro ao carregar faturas:', error);
+        showAlert('Erro ao carregar faturas: ' + error.message, 'danger');
+        invoices = [];
+        renderInvoices([]);
     } finally {
         document.getElementById('loadingInvoices').style.display = 'none';
         document.getElementById('invoicesList').style.display = 'block';
     }
+}
+
+function renderInvoices(invoices) {
+    const tbody = document.getElementById('invoicesTableBody');
+    const emptyState = document.getElementById('emptyState');
+    const countBadge = document.getElementById('invoicesCountBadge');
+    
+    if (countBadge) countBadge.textContent = invoices.length.toString();
+    
+    if (invoices.length === 0) {
+        tbody.innerHTML = '';
+        emptyState.style.display = 'block';
+        return;
+    }
+    
+    emptyState.style.display = 'none';
+    
+    const statusBadgeMap = {
+        'draft': 'bg-secondary',
+        'open': 'bg-warning',
+        'paid': 'bg-success',
+        'void': 'bg-danger',
+        'uncollectible': 'bg-dark'
+    };
+    
+    tbody.innerHTML = invoices.map(inv => {
+        const statusBadge = statusBadgeMap[inv.status] || 'bg-secondary';
+        const statusText = {
+            'draft': 'Rascunho',
+            'open': 'Aberta',
+            'paid': 'Paga',
+            'void': 'Anulada',
+            'uncollectible': 'Não cobrável'
+        }[inv.status] || inv.status;
+        
+        // Busca nome do cliente se disponível
+        const customerName = inv.customer_name || inv.customer_email || inv.customer || 'Cliente não identificado';
+        
+        return `
+            <tr>
+                <td><code class="small">${escapeHtml(inv.id)}</code></td>
+                <td>
+                    ${typeof inv.customer === 'string' && inv.customer.startsWith('cus_') 
+                        ? `<a href="/customer-details?id=${inv.customer}">${escapeHtml(customerName)}</a>`
+                        : escapeHtml(customerName)
+                    }
+                </td>
+                <td><strong>${formatCurrencyReais(inv.amount_due, inv.currency)}</strong></td>
+                <td><span class="badge ${statusBadge}">${statusText}</span></td>
+                <td>${formatDate(inv.created)}</td>
+                <td>
+                    <a href="/invoice-details?id=${inv.id}" class="btn btn-sm btn-outline-primary" title="Ver detalhes">
+                        <i class="bi bi-eye"></i>
+                    </a>
+                    ${inv.invoice_pdf ? `
+                        <a href="${inv.invoice_pdf}" target="_blank" class="btn btn-sm btn-outline-secondary" title="Baixar PDF">
+                            <i class="bi bi-file-pdf"></i>
+                        </a>
+                    ` : ''}
+                </td>
+            </tr>
+        `;
+    }).join('');
 }
 
 function calculateInvoiceStats() {
@@ -199,7 +288,8 @@ function updateInvoiceStats(stats) {
     document.getElementById('totalInvoicesStat').textContent = formatNumber(stats.total);
     document.getElementById('paidInvoicesStat').textContent = formatNumber(stats.paid);
     document.getElementById('openInvoicesStat').textContent = formatNumber(stats.open);
-    document.getElementById('totalInvoicesAmountStat').textContent = formatCurrency(stats.totalAmount, 'BRL');
+    // ✅ CORREÇÃO: Usa formatCurrencyReais porque o valor já vem em reais
+    document.getElementById('totalInvoicesAmountStat').textContent = formatCurrencyReais(stats.totalAmount, 'BRL');
 }
 
 // Função auxiliar para escape HTML

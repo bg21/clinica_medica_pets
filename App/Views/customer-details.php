@@ -210,6 +210,29 @@ function renderSubscriptions(subscriptions) {
     `).join('');
 }
 
+// ✅ CORREÇÃO: Função local para formatar moeda sem dividir por 100 (valor já vem em reais)
+function formatCurrencyReais(value, currency = 'BRL') {
+    if (!value && value !== 0) return '-';
+    
+    const currencyMap = {
+        'BRL': 'pt-BR',
+        'USD': 'en-US',
+        'EUR': 'de-DE',
+        'GBP': 'en-GB'
+    };
+    
+    const locale = currencyMap[currency?.toUpperCase()] || 'pt-BR';
+    const currencyCode = currency?.toUpperCase() || 'BRL';
+    
+    // ✅ CORREÇÃO: O valor já vem em reais do backend (não divide por 100)
+    const finalAmount = parseFloat(value);
+    
+    return new Intl.NumberFormat(locale, {
+        style: 'currency',
+        currency: currencyCode
+    }).format(finalAmount);
+}
+
 function renderInvoices(invoices) {
     const container = document.getElementById('invoicesList');
     if (invoices.length === 0) {
@@ -224,7 +247,7 @@ function renderInvoices(invoices) {
                     <small class="text-muted">${formatDate(inv.created)}</small>
                 </div>
                 <div class="text-end">
-                    <strong>${formatCurrency(inv.amount_due, inv.currency)}</strong><br>
+                    <strong>${formatCurrencyReais(inv.amount_due, inv.currency)}</strong><br>
                     <span class="badge bg-${inv.status === 'paid' ? 'success' : 'warning'}">${inv.status}</span>
                 </div>
             </div>

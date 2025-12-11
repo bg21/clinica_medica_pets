@@ -61,7 +61,7 @@ $message = $messages[$reason] ?? $messages['SUBSCRIPTION_REQUIRED'];
                         </div>
                         
                         <div class="d-grid gap-2">
-                            <a href="/choose-plan" class="btn btn-primary btn-lg">
+                            <a href="/my-subscription" class="btn btn-primary btn-lg">
                                 <i class="bi bi-credit-card"></i> Escolher Plano
                             </a>
                             <a href="/subscriptions" class="btn btn-outline-secondary">

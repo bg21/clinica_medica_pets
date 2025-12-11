@@ -42,8 +42,14 @@ class PromotionCodeController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_promotion_code']);
                 return;
             }
@@ -71,13 +77,15 @@ class PromotionCodeController
                 return;
             }
 
-            // Adiciona tenant_id aos metadados se não existir
-            if (!isset($data['metadata'])) {
-                $data['metadata'] = [];
+            // Adiciona tenant_id aos metadados se não existir (apenas para clínicas)
+            if (!$isSaasAdmin && $tenantId !== null) {
+                if (!isset($data['metadata'])) {
+                    $data['metadata'] = [];
+                }
+                $data['metadata']['tenant_id'] = $tenantId;
             }
-            $data['metadata']['tenant_id'] = $tenantId;
 
-            $promotionCode = $this->stripeService->createPromotionCode($data);
+            $promotionCode = $stripeService->createPromotionCode($data);
 
             ResponseHelper::sendCreated([
                 'id' => $promotionCode->id,
@@ -138,8 +146,14 @@ class PromotionCodeController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_promotion_codes']);
                 return;
             }
@@ -185,11 +199,19 @@ class PromotionCodeController
                 $options['ending_before'] = $queryParams['ending_before'];
             }
             
-            $promotionCodes = $this->stripeService->listPromotionCodes($options);
+            $promotionCodes = $stripeService->listPromotionCodes($options);
             
             // Formata resposta
             $formattedCodes = [];
             foreach ($promotionCodes->data as $promotionCode) {
+                // ✅ CORREÇÃO: Filtra apenas códigos promocionais do tenant (via metadata) - apenas para clínicas
+                if (!$isSaasAdmin && $tenantId !== null) {
+                    if (isset($promotionCode->metadata->tenant_id) && 
+                        (string)$promotionCode->metadata->tenant_id !== (string)$tenantId) {
+                        continue; // Pula códigos de outros tenants
+                    }
+                }
+                
                 $formattedCodes[] = [
                     'id' => $promotionCode->id,
                     'code' => $promotionCode->code,
@@ -245,19 +267,27 @@ class PromotionCodeController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_promotion_codes']);
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_promotion_code']);
                 return;
             }
 
-            $promotionCode = $this->stripeService->getPromotionCode($id);
+            $promotionCode = $stripeService->getPromotionCode($id);
 
-            // Valida se pertence ao tenant (via metadata)
-            if (isset($promotionCode->metadata->tenant_id) && 
-                (string)$promotionCode->metadata->tenant_id !== (string)$tenantId) {
-                ResponseHelper::sendNotFoundError('Código promocional', ['action' => 'get_promotion_code', 'promotion_code_id' => $id, 'tenant_id' => $tenantId]);
-                return;
+            // ✅ CORREÇÃO: Valida se pertence ao tenant (via metadata) - apenas para clínicas
+            if (!$isSaasAdmin && $tenantId !== null) {
+                if (isset($promotionCode->metadata->tenant_id) && 
+                    (string)$promotionCode->metadata->tenant_id !== (string)$tenantId) {
+                    ResponseHelper::sendNotFoundError('Código promocional', ['action' => 'get_promotion_code', 'promotion_code_id' => $id, 'tenant_id' => $tenantId]);
+                    return;
+                }
             }
 
             ResponseHelper::sendSuccess([
@@ -312,19 +342,28 @@ class PromotionCodeController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
             
-            if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_promotion_codes']);
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'update_promotion_code']);
                 return;
             }
 
             // Primeiro, verifica se o promotion code existe e pertence ao tenant
-            $promotionCode = $this->stripeService->getPromotionCode($id);
+            $promotionCode = $stripeService->getPromotionCode($id);
             
-            if (isset($promotionCode->metadata->tenant_id) && 
-                (string)$promotionCode->metadata->tenant_id !== (string)$tenantId) {
-                ResponseHelper::sendNotFoundError('Código promocional', ['action' => 'update_promotion_code', 'promotion_code_id' => $id, 'tenant_id' => $tenantId]);
-                return;
+            // ✅ CORREÇÃO: Valida se pertence ao tenant (via metadata) - apenas para clínicas
+            if (!$isSaasAdmin && $tenantId !== null) {
+                if (isset($promotionCode->metadata->tenant_id) && 
+                    (string)$promotionCode->metadata->tenant_id !== (string)$tenantId) {
+                    ResponseHelper::sendNotFoundError('Código promocional', ['action' => 'update_promotion_code', 'promotion_code_id' => $id, 'tenant_id' => $tenantId]);
+                    return;
+                }
             }
 
             // ✅ OTIMIZAÇÃO: Usa RequestCache para evitar múltiplas leituras
@@ -384,12 +423,12 @@ class PromotionCodeController
                 }
             }
 
-            // Preserva tenant_id nos metadados se metadata for atualizado
-            if (isset($data['metadata'])) {
+            // Preserva tenant_id nos metadados se metadata for atualizado (apenas para clínicas)
+            if (!$isSaasAdmin && $tenantId !== null && isset($data['metadata'])) {
                 $data['metadata']['tenant_id'] = $tenantId;
             }
 
-            $promotionCode = $this->stripeService->updatePromotionCode($id, $data);
+            $promotionCode = $stripeService->updatePromotionCode($id, $data);
 
             ResponseHelper::sendSuccess([
                 'id' => $promotionCode->id,

@@ -7,6 +7,7 @@ use App\Models\Customer;
 use App\Utils\PermissionHelper;
 use App\Utils\ResponseHelper;
 use App\Utils\Validator;
+use App\Traits\HasModuleAccess;
 use Flight;
 
 /**
@@ -14,6 +15,9 @@ use Flight;
  */
 class PetController
 {
+    use HasModuleAccess;
+    
+    private const MODULE_ID = 'pets';
     /**
      * Cria um novo pet
      * POST /v1/clinic/pets
@@ -27,6 +31,11 @@ class PetController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_pet']);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "pets"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             
@@ -91,6 +100,11 @@ class PetController
                 return;
             }
             
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "pets"
+            if (!$this->checkModuleAccess()) {
+                return;
+            }
+            
             $queryParams = Flight::request()->query;
             $page = isset($queryParams['page']) ? max(1, (int)$queryParams['page']) : 1;
             $limit = isset($queryParams['limit']) ? min(100, max(1, (int)$queryParams['limit'])) : 20;
@@ -149,6 +163,11 @@ class PetController
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_pet', 'pet_id' => $id]);
                 return;
             }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "pets"
+            if (!$this->checkModuleAccess()) {
+                return;
+            }
 
             $petModel = new Pet();
             $pet = $petModel->findByTenantAndId($tenantId, (int)$id);
@@ -182,6 +201,11 @@ class PetController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'update_pet', 'pet_id' => $id]);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "pets"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             
@@ -229,6 +253,11 @@ class PetController
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'delete_pet', 'pet_id' => $id]);
                 return;
             }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "pets"
+            if (!$this->checkModuleAccess()) {
+                return;
+            }
 
             $petModel = new Pet();
             $pet = $petModel->findByTenantAndId($tenantId, (int)$id);
@@ -264,6 +293,11 @@ class PetController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_pets_by_customer', 'customer_id' => $customerId]);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "pets"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             

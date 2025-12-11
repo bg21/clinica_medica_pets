@@ -209,6 +209,29 @@ async function loadSubscriptionDetails() {
     }
 }
 
+// ✅ CORREÇÃO: Função local para formatar moeda sem dividir por 100 (valor já vem em reais)
+function formatCurrencyReais(amount, currency = 'BRL') {
+    if (!amount && amount !== 0) return '-';
+    
+    const currencyMap = {
+        'BRL': 'pt-BR',
+        'USD': 'en-US',
+        'EUR': 'de-DE',
+        'GBP': 'en-GB'
+    };
+    
+    const locale = currencyMap[currency?.toUpperCase()] || 'pt-BR';
+    const currencyCode = currency?.toUpperCase() || 'BRL';
+    
+    // Garante que é um número e não divide novamente
+    const finalAmount = parseFloat(amount);
+    
+    return new Intl.NumberFormat(locale, {
+        style: 'currency',
+        currency: currencyCode
+    }).format(finalAmount);
+}
+
 function renderSubscriptionInfo(sub) {
     // ✅ CORREÇÃO: Usa created_at ou created (compatibilidade)
     const createdAt = sub.created_at || sub.created || null;
@@ -218,47 +241,122 @@ function renderSubscriptionInfo(sub) {
     if (sub.current_period_end) {
         try {
             // Tenta formatar a data
-            const formatted = formatDate(sub.current_period_end);
-            // Se formatDate retornou '-', significa que não conseguiu formatar
-            // Tenta formatar manualmente
-            if (formatted === '-' || !formatted) {
-                // Tenta criar Date diretamente
-                const date = new Date(sub.current_period_end);
-                if (!isNaN(date.getTime())) {
-                    nextPayment = date.toLocaleDateString('pt-BR', {
-                        day: '2-digit',
-                        month: '2-digit',
-                        year: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit'
-                    });
-                } else {
-                    nextPayment = sub.current_period_end; // Mostra valor bruto
+            // O backend retorna no formato 'Y-m-d H:i:s' (ex: '2025-12-10 03:57:00')
+            let date;
+            
+            // Tenta criar Date diretamente (aceita formato ISO e outros)
+            date = new Date(sub.current_period_end);
+            
+            // Se não funcionar, tenta parsear formato 'Y-m-d H:i:s'
+            if (isNaN(date.getTime())) {
+                // Formato: '2025-12-10 03:57:00'
+                const parts = sub.current_period_end.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/);
+                if (parts) {
+                    date = new Date(
+                        parseInt(parts[1]), // ano
+                        parseInt(parts[2]) - 1, // mês (0-indexed)
+                        parseInt(parts[3]), // dia
+                        parseInt(parts[4]), // hora
+                        parseInt(parts[5]), // minuto
+                        parseInt(parts[6]) // segundo
+                    );
                 }
+            }
+            
+            if (!isNaN(date.getTime())) {
+                nextPayment = date.toLocaleDateString('pt-BR', {
+                    day: '2-digit',
+                    month: '2-digit',
+                    year: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                });
             } else {
-                nextPayment = formatted;
+                // Se ainda não funcionou, mostra o valor bruto
+                nextPayment = sub.current_period_end;
             }
         } catch (e) {
             console.error('Erro ao formatar current_period_end:', e, sub.current_period_end);
-            nextPayment = sub.current_period_end || '-'; // Mostra o valor bruto se falhar
+            nextPayment = sub.current_period_end || '-';
         }
     }
+    
+    // ✅ CORREÇÃO: Exibe nome do cliente se disponível
+    const customerDisplay = sub.customer_name || sub.customer_id || '-';
+    const customerLink = sub.customer_id ? `<a href="/customer-details?id=${sub.customer_id}">${escapeHtml(customerDisplay)}</a>` : escapeHtml(customerDisplay);
     
     document.getElementById('subscriptionInfo').innerHTML = `
         <div class="row">
             <div class="col-md-6">
-                <p><strong>ID:</strong> ${sub.id}</p>
-                <p><strong>Status:</strong> <span class="badge bg-${sub.status === 'active' ? 'success' : 'secondary'}">${sub.status}</span></p>
-                <p><strong>Cliente:</strong> ${sub.customer_id}</p>
-                <p><strong>Preço:</strong> <code>${sub.price_id || '-'}</code></p>
+                <p><strong>ID:</strong> <code>${escapeHtml(sub.stripe_subscription_id || sub.id)}</code></p>
+                <p><strong>Status:</strong> <span class="badge bg-${sub.status === 'active' ? 'success' : sub.status === 'canceled' ? 'danger' : 'secondary'}">${escapeHtml(sub.status)}</span></p>
+                <p><strong>Cliente:</strong> ${customerLink}</p>
+                ${sub.plan_name ? `<p><strong>Plano:</strong> ${escapeHtml(sub.plan_name)}</p>` : ''}
+                <p><strong>Preço:</strong> <code>${escapeHtml(sub.price_id || '-')}</code></p>
             </div>
             <div class="col-md-6">
-                <p><strong>Valor:</strong> ${sub.amount ? formatCurrency(sub.amount, sub.currency || 'BRL') : '-'}</p>
+                <p><strong>Valor:</strong> ${sub.amount !== undefined && sub.amount !== null ? formatCurrencyReais(sub.amount, sub.currency || 'BRL') : '-'}</p>
                 <p><strong>Próximo Pagamento:</strong> ${nextPayment}</p>
-                <p><strong>Criado em:</strong> ${createdAt ? formatDate(createdAt) : '-'}</p>
+                <p><strong>Criado em:</strong> ${createdAt ? formatDateString(createdAt) : '-'}</p>
             </div>
         </div>
     `;
+}
+
+// ✅ Helper para escapar HTML
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// ✅ Helper para formatar data (compatível com formatDate do dashboard.js)
+function formatDateString(dateString) {
+    if (!dateString) return '-';
+    
+    try {
+        // Tenta usar formatDate se disponível
+        if (typeof formatDate === 'function') {
+            const formatted = formatDate(dateString);
+            if (formatted && formatted !== '-') {
+                return formatted;
+            }
+        }
+        
+        // Fallback: formata manualmente
+        let date = new Date(dateString);
+        
+        // Se não funcionar, tenta parsear formato 'Y-m-d H:i:s'
+        if (isNaN(date.getTime())) {
+            const parts = dateString.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/);
+            if (parts) {
+                date = new Date(
+                    parseInt(parts[1]),
+                    parseInt(parts[2]) - 1,
+                    parseInt(parts[3]),
+                    parseInt(parts[4]),
+                    parseInt(parts[5]),
+                    parseInt(parts[6])
+                );
+            }
+        }
+        
+        if (!isNaN(date.getTime())) {
+            return date.toLocaleDateString('pt-BR', {
+                day: '2-digit',
+                month: '2-digit',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        }
+        
+        return dateString; // Retorna valor bruto se não conseguir formatar
+    } catch (e) {
+        console.error('Erro ao formatar data:', e, dateString);
+        return dateString;
+    }
 }
 
 function renderHistory(history) {

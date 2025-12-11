@@ -10,6 +10,7 @@ use App\Services\BudgetService;
 use App\Services\CommissionService;
 use App\Utils\PermissionHelper;
 use App\Utils\ResponseHelper;
+use App\Traits\HasModuleAccess;
 use Flight;
 
 /**
@@ -17,7 +18,10 @@ use Flight;
  */
 class BudgetController
 {
+    use HasModuleAccess;
+    
     private BudgetService $budgetService;
+    private const MODULE_ID = 'financial';
 
     public function __construct(BudgetService $budgetService)
     {
@@ -37,6 +41,11 @@ class BudgetController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'create_budget']);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "financial"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             
@@ -96,6 +105,11 @@ class BudgetController
                 return;
             }
             
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "financial"
+            if (!$this->checkModuleAccess()) {
+                return;
+            }
+            
             $queryParams = Flight::request()->query;
             $page = isset($queryParams['page']) ? max(1, (int)$queryParams['page']) : 1;
             $limit = isset($queryParams['limit']) ? min(100, max(1, (int)$queryParams['limit'])) : 20;
@@ -144,6 +158,11 @@ class BudgetController
                 return;
             }
             
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "financial"
+            if (!$this->checkModuleAccess()) {
+                return;
+            }
+            
             $budgetModel = new Budget();
             $budget = $budgetModel->findByTenantAndId($tenantId, $id);
             
@@ -181,6 +200,11 @@ class BudgetController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'update_budget']);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "financial"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             
@@ -232,6 +256,11 @@ class BudgetController
                 return;
             }
             
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "financial"
+            if (!$this->checkModuleAccess()) {
+                return;
+            }
+            
             $data = \App\Utils\RequestCache::getJsonInput();
             $invoiceId = $data['invoice_id'] ?? null;
             
@@ -273,6 +302,11 @@ class BudgetController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'delete_budget']);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "financial"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             

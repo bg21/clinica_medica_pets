@@ -44,6 +44,20 @@ class BalanceTransactionController
             // Verifica permissão (só verifica se for autenticação de usuário)
             PermissionHelper::require('view_balance_transactions');
             
+            $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            // Se for SaaS admin, usa conta principal; senão, usa conta da clínica
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_balance_transactions']);
+                return;
+            }
+            
             // ✅ CORREÇÃO: Flight::request()->query retorna Collection, precisa converter para array
             try {
                 $queryParams = Flight::request()->query->getData();
@@ -100,7 +114,7 @@ class BalanceTransactionController
                 $options['currency'] = strtolower($queryParams['currency']);
             }
             
-            $balanceTransactions = $this->stripeService->listBalanceTransactions($options);
+            $balanceTransactions = $stripeService->listBalanceTransactions($options);
             
             // Formata resposta
             $formattedTransactions = [];
@@ -166,6 +180,19 @@ class BalanceTransactionController
             // Verifica permissão (só verifica se for autenticação de usuário)
             PermissionHelper::require('view_balance_transactions');
             
+            $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_balance_transaction']);
+                return;
+            }
+            
             // Valida ID
             $idErrors = Validator::validateStripeId($id, 'balance_transaction_id');
             if (!empty($idErrors)) {
@@ -177,7 +204,7 @@ class BalanceTransactionController
                 return;
             }
 
-            $balanceTransaction = $this->stripeService->getBalanceTransaction($id);
+            $balanceTransaction = $stripeService->getBalanceTransaction($id);
             
             // Prepara dados básicos
             $data = [
@@ -235,7 +262,7 @@ class BalanceTransactionController
                         // Se for uma charge, busca detalhes
                         if (strpos($sourceId, 'ch_') === 0 || $sourceType === 'charge') {
                             try {
-                                $charge = $this->stripeService->getCharge($sourceId);
+                                $charge = $stripeService->getCharge($sourceId);
                                 $data['source_details'] = [
                                     'type' => 'charge',
                                     'id' => $charge->id,
@@ -285,7 +312,7 @@ class BalanceTransactionController
                         // Se for um refund, busca detalhes
                         elseif (strpos($sourceId, 're_') === 0 || $sourceType === 'refund') {
                             try {
-                                $refund = $this->stripeService->getRefund($sourceId);
+                                $refund = $stripeService->getRefund($sourceId);
                                 $data['source_details'] = [
                                     'type' => 'refund',
                                     'id' => $refund->id,
@@ -322,7 +349,7 @@ class BalanceTransactionController
                 
                 if ($payoutId) {
                     try {
-                        $payout = $this->stripeService->getPayout($payoutId);
+                        $payout = $stripeService->getPayout($payoutId);
                         $data['payout_details'] = [
                             'id' => $payout->id,
                             'amount' => $payout->amount,

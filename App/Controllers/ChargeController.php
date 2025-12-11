@@ -43,6 +43,19 @@ class ChargeController
             // Verifica permissão (só verifica se for autenticação de usuário)
             PermissionHelper::require('view_charges');
             
+            $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_charges']);
+                return;
+            }
+            
             // ✅ CORREÇÃO: Flight::request()->query retorna Collection, precisa converter para array
             try {
                 $queryParams = Flight::request()->query->getData();
@@ -98,7 +111,7 @@ class ChargeController
             }
 
             // Lista charges
-            $charges = $this->stripeService->listCharges($options);
+            $charges = $stripeService->listCharges($options);
 
             // ✅ CORREÇÃO: Prepara array de charges diretamente
             $chargesData = [];
@@ -158,8 +171,21 @@ class ChargeController
             // Verifica permissão (só verifica se for autenticação de usuário)
             PermissionHelper::require('view_charges');
             
+            $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_charge']);
+                return;
+            }
+            
             // Obtém charge
-            $charge = $this->stripeService->getCharge($id);
+            $charge = $stripeService->getCharge($id);
 
             // Prepara resposta
             $response = [
@@ -261,6 +287,19 @@ class ChargeController
                 $data = [];
             }
 
+            $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'update_charge']);
+                return;
+            }
+            
             // Valida que há dados para atualizar
             if (empty($data)) {
                 ResponseHelper::sendValidationError(
@@ -298,7 +337,7 @@ class ChargeController
             }
 
             // Atualiza charge
-            $charge = $this->stripeService->updateCharge($id, $data);
+            $charge = $stripeService->updateCharge($id, $data);
 
             // Prepara resposta
             $response = [

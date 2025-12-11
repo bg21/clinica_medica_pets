@@ -43,6 +43,19 @@ class DisputeController
             // Verifica permissão (só verifica se for autenticação de usuário)
             PermissionHelper::require('view_disputes');
             
+            $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_disputes']);
+                return;
+            }
+            
             // ✅ CORREÇÃO: Flight::request()->query retorna Collection, precisa converter para array
             try {
                 $queryParams = Flight::request()->query->getData();
@@ -95,7 +108,7 @@ class DisputeController
                 $options['payment_intent'] = $queryParams['payment_intent'];
             }
             
-            $disputes = $this->stripeService->listDisputes($options);
+            $disputes = $stripeService->listDisputes($options);
             
             // Formata resposta
             $formattedDisputes = [];
@@ -184,6 +197,19 @@ class DisputeController
             // Verifica permissão (só verifica se for autenticação de usuário)
             PermissionHelper::require('view_disputes');
             
+            $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_dispute']);
+                return;
+            }
+            
             // Valida ID
             $idErrors = Validator::validateDisputeId($id);
             if (!empty($idErrors)) {
@@ -195,7 +221,7 @@ class DisputeController
                 return;
             }
 
-            $dispute = $this->stripeService->getDispute($id);
+            $dispute = $stripeService->getDispute($id);
             
             ResponseHelper::sendSuccess([
                 'id' => $dispute->id,
@@ -311,7 +337,20 @@ class DisputeController
                 return;
             }
 
-            $dispute = $this->stripeService->updateDispute($id, $data);
+            $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // ✅ CORREÇÃO: Determina qual StripeService usar
+            if ($isSaasAdmin && $tenantId === null) {
+                $stripeService = $this->stripeService; // Conta principal
+            } elseif ($tenantId !== null) {
+                $stripeService = \App\Services\StripeService::forTenant($tenantId); // Conta da clínica
+            } else {
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'update_dispute']);
+                return;
+            }
+            
+            $dispute = $stripeService->updateDispute($id, $data);
             
             ResponseHelper::sendSuccess([
                 'id' => $dispute->id,

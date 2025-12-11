@@ -420,23 +420,40 @@
                     throw new Error(errorMessage);
                 }
                 
-                const successMessage = userType === 'owner' 
-                    ? 'Empresa e conta criadas com sucesso! Você já está logado. Redirecionando...'
-                    : 'Conta criada com sucesso! Redirecionando para o login...';
-                
-                showAlert(successMessage, 'success');
-                
-                // Se for dono, já está logado (retorna session_id), então redireciona para escolha de plano
-                // Se for funcionário, precisa fazer login
-                setTimeout(() => {
-                    if (userType === 'owner' && result.data && result.data.session_id) {
-                        // Salva session_id e redireciona para escolha de plano
+                // ✅ OBRIGATÓRIO: Verifica se precisa configurar Stripe Connect
+                if (userType === 'owner' && result.data && result.data.requires_stripe_connect) {
+                    const successMessage = 'Empresa e conta criadas com sucesso! Configure sua conta Stripe para continuar.';
+                    showAlert(successMessage, 'info');
+                    
+                    // Salva session_id e redireciona para configuração do Stripe Connect
+                    if (result.data.session_id) {
                         localStorage.setItem('session_id', result.data.session_id);
-                        window.location.href = '/choose-plan';
-                    } else {
-                        window.location.href = '/login';
+                        localStorage.setItem('user', JSON.stringify(result.data.user || {}));
+                        localStorage.setItem('tenant', JSON.stringify(result.data.tenant || {}));
                     }
-                }, 2000);
+                    
+                    setTimeout(() => {
+                        window.location.href = result.data.stripe_connect_url || '/stripe-connect';
+                    }, 2000);
+                } else {
+                    const successMessage = userType === 'owner' 
+                        ? 'Empresa e conta criadas com sucesso! Você já está logado. Redirecionando...'
+                        : 'Conta criada com sucesso! Redirecionando para o login...';
+                    
+                    showAlert(successMessage, 'success');
+                    
+                    // Se for dono, já está logado (retorna session_id), então redireciona para escolha de plano
+                    // Se for funcionário, precisa fazer login
+                    setTimeout(() => {
+                        if (userType === 'owner' && result.data && result.data.session_id) {
+                            // Salva session_id e redireciona para escolha de plano
+                            localStorage.setItem('session_id', result.data.session_id);
+                            window.location.href = '/my-subscription';
+                        } else {
+                            window.location.href = '/login';
+                        }
+                    }, 2000);
+                }
             } catch (error) {
                 showAlert(error.message, 'danger');
             }

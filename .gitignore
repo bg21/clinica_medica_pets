@@ -5,3 +5,7 @@
 *.log
 composer.lock
 
+# Arquivos de teste com dados sensíveis
+/test_stripe_key_save.php
+/fix_stripe_secret_key.php
+

@@ -98,7 +98,41 @@ class ProductController
             }
             $data['metadata']['tenant_id'] = $tenantId;
 
-            $product = $this->stripeService->createProduct($data);
+            // ✅ CORREÇÃO: Usa conta Stripe da clínica (não a conta do usuário)
+            // Produtos criados pela clínica devem ir para a conta Stripe da clínica
+            $clinicStripeService = \App\Services\StripeService::forTenant($tenantId);
+            $product = $clinicStripeService->createProduct($data);
+            
+            Logger::info("Produto criado na conta Stripe da clínica", [
+                'tenant_id' => $tenantId,
+                'product_id' => $product->id,
+                'product_name' => $product->name
+            ]);
+
+            // ✅ CORREÇÃO: Invalida cache de produtos após criar
+            $clinicStripeService->invalidateProductsCache();
+            
+            // ✅ CORREÇÃO: Limpa cache do CacheService (Redis/Memória) para este tenant
+            try {
+                $redis = \App\Services\CacheService::getRedisClient();
+                if ($redis) {
+                    // Busca todas as chaves de cache de produtos deste tenant
+                    $keys = $redis->keys('products:list:' . $tenantId . ':*');
+                    if (!empty($keys)) {
+                        $redis->del($keys);
+                        Logger::debug("Cache de produtos invalidado", [
+                            'tenant_id' => $tenantId,
+                            'keys_deleted' => count($keys)
+                        ]);
+                    }
+                }
+            } catch (\Exception $e) {
+                // Se não conseguir acessar Redis, pelo menos invalida o cache do StripeService
+                Logger::warning("Erro ao invalidar cache de produtos (Redis)", [
+                    'tenant_id' => $tenantId,
+                    'error' => $e->getMessage()
+                ]);
+            }
 
             ResponseHelper::sendCreated([
                 'id' => $product->id,
@@ -148,6 +182,65 @@ class ProductController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // Se for administrador SaaS, busca diretamente do Stripe (conta principal)
+            if ($isSaasAdmin && $tenantId === null) {
+                // ✅ CORREÇÃO: Flight::request()->query retorna Collection, precisa converter para array
+                try {
+                    $queryParams = Flight::request()->query->getData();
+                    if (!is_array($queryParams)) {
+                        $queryParams = [];
+                    }
+                } catch (\Exception $e) {
+                    error_log("Erro ao obter query params: " . $e->getMessage());
+                    $queryParams = [];
+                }
+                
+                $options = [];
+                
+                // Define limite padrão de 50 se não fornecido (melhora performance)
+                if (isset($queryParams['limit'])) {
+                    $options['limit'] = min((int)$queryParams['limit'], 100); // Máximo 100
+                } else {
+                    $options['limit'] = 50; // Padrão: 50 itens
+                }
+                
+                if (!empty($queryParams['starting_after'])) {
+                    $options['starting_after'] = $queryParams['starting_after'];
+                }
+                
+                if (!empty($queryParams['ending_before'])) {
+                    $options['ending_before'] = $queryParams['ending_before'];
+                }
+                
+                if (isset($queryParams['active'])) {
+                    $options['active'] = filter_var($queryParams['active'], FILTER_VALIDATE_BOOLEAN);
+                }
+                
+                // Busca diretamente do Stripe usando conta principal
+                $products = $this->stripeService->listProducts($options);
+                
+                $productsData = [];
+                foreach ($products->data as $product) {
+                    $productsData[] = [
+                        'id' => $product->id,
+                        'name' => $product->name,
+                        'description' => $product->description,
+                        'active' => $product->active,
+                        'images' => $product->images ?? [],
+                        'metadata' => (array)$product->metadata,
+                        'created' => date('Y-m-d H:i:s', $product->created),
+                        'updated' => isset($product->updated) ? date('Y-m-d H:i:s', $product->updated) : null
+                    ];
+                }
+                
+                ResponseHelper::sendSuccess($productsData, 200, null, [
+                    'has_more' => $products->has_more,
+                    'total' => count($productsData)
+                ]);
+                return;
+            }
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_products']);
@@ -189,6 +282,9 @@ class ProductController
             // Opção para ignorar filtro de tenant (útil para formulários de criação)
             $ignoreTenantFilter = isset($queryParams['all_tenants']) && filter_var($queryParams['all_tenants'], FILTER_VALIDATE_BOOLEAN);
             
+            // ✅ CORREÇÃO: Parâmetro para forçar refresh do cache
+            $forceRefresh = isset($queryParams['refresh']) && filter_var($queryParams['refresh'], FILTER_VALIDATE_BOOLEAN);
+            
             // ✅ CACHE: Gera chave única baseada em parâmetros
             $cacheKey = sprintf(
                 'products:list:%d:%d:%s:%s:%s:%s',
@@ -200,8 +296,12 @@ class ProductController
                 $ignoreTenantFilter ? '1' : '0'
             );
             
-            // ✅ Tenta obter do cache (TTL: 60 segundos)
-            $cached = \App\Services\CacheService::getJson($cacheKey);
+            // ✅ Tenta obter do cache (TTL: 60 segundos) - apenas se não forçar refresh
+            $cached = null;
+            if (!$forceRefresh) {
+                $cached = \App\Services\CacheService::getJson($cacheKey);
+            }
+            
             if ($cached !== null) {
                 // ✅ CORREÇÃO: Se cache tem formato antigo {data: [...], meta: {...}}, converte
                 if (isset($cached['data']) && isset($cached['meta'])) {
@@ -221,7 +321,16 @@ class ProductController
                 return;
             }
             
-            $products = $this->stripeService->listProducts($options);
+            // ✅ CORREÇÃO: Usa conta Stripe da clínica para listar produtos
+            $clinicStripeService = \App\Services\StripeService::forTenant($tenantId);
+            $products = $clinicStripeService->listProducts($options);
+            
+            Logger::debug("Produtos retornados do Stripe", [
+                'tenant_id' => $tenantId,
+                'count' => count($products->data),
+                'has_more' => $products->has_more ?? false,
+                'force_refresh' => $forceRefresh ?? false
+            ]);
             
             // Formata resposta e filtra por tenant_id (via metadata)
             // Otimização: Filtra apenas produtos do tenant atual (exceto se all_tenants=true)
@@ -268,7 +377,7 @@ class ProductController
                 while ($remaining > 0 && $products->has_more) {
                     $options['starting_after'] = $lastProduct->id;
                     $options['limit'] = min($remaining, 50);
-                    $moreProducts = $this->stripeService->listProducts($options);
+                    $moreProducts = $clinicStripeService->listProducts($options);
                     
                     foreach ($moreProducts->data as $product) {
                         // Aplica o mesmo filtro de tenant_id (exceto se all_tenants=true)
@@ -352,13 +461,36 @@ class ProductController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // Se for administrador SaaS, busca diretamente do Stripe (conta principal)
+            if ($isSaasAdmin && $tenantId === null) {
+                // Busca diretamente do Stripe usando conta principal
+                $product = $this->stripeService->getProduct($id);
+                
+                ResponseHelper::sendSuccess([
+                    'id' => $product->id,
+                    'name' => $product->name,
+                    'description' => $product->description ?? null,
+                    'active' => $product->active,
+                    'images' => $product->images ?? [],
+                    'statement_descriptor' => $product->statement_descriptor ?? null,
+                    'unit_label' => $product->unit_label ?? null,
+                    'created' => date('Y-m-d H:i:s', $product->created),
+                    'updated' => date('Y-m-d H:i:s', $product->updated ?? $product->created),
+                    'metadata' => $product->metadata->toArray()
+                ]);
+                return;
+            }
             
             if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_products']);
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'get_product']);
                 return;
             }
 
-            $product = $this->stripeService->getProduct($id);
+            // ✅ CORREÇÃO: Usa conta Stripe da clínica
+            $clinicStripeService = \App\Services\StripeService::forTenant($tenantId);
+            $product = $clinicStripeService->getProduct($id);
 
             // Valida se o produto pertence ao tenant (via metadata)
             if (isset($product->metadata->tenant_id) && (string)$product->metadata->tenant_id !== (string)$tenantId) {
@@ -415,14 +547,52 @@ class ProductController
     {
         try {
             $tenantId = Flight::get('tenant_id');
+            $isSaasAdmin = Flight::get('is_saas_admin') ?? false;
+            
+            // Se for administrador SaaS, usa conta principal
+            if ($isSaasAdmin && $tenantId === null) {
+                // Busca diretamente do Stripe usando conta principal
+                $data = \App\Utils\RequestCache::getJsonInput();
+                
+                if ($data === null) {
+                    if (json_last_error() !== JSON_ERROR_NONE) {
+                        ResponseHelper::sendInvalidJsonError(['product_id' => $id]);
+                        return;
+                    }
+                    $data = [];
+                }
+                
+                // Atualiza produto usando conta principal
+                $product = $this->stripeService->updateProduct($id, $data);
+                
+                // Invalida cache
+                $this->stripeService->invalidateProductsCache();
+                
+                ResponseHelper::sendSuccess([
+                    'id' => $product->id,
+                    'name' => $product->name,
+                    'description' => $product->description ?? null,
+                    'active' => $product->active,
+                    'images' => $product->images ?? [],
+                    'statement_descriptor' => $product->statement_descriptor ?? null,
+                    'unit_label' => $product->unit_label ?? null,
+                    'created' => date('Y-m-d H:i:s', $product->created),
+                    'updated' => date('Y-m-d H:i:s', $product->updated ?? $product->created),
+                    'metadata' => $product->metadata->toArray()
+                ], 200, 'Produto atualizado com sucesso');
+                return;
+            }
             
             if ($tenantId === null) {
-                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'list_products']);
+                ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'update_product']);
                 return;
             }
 
+            // ✅ CORREÇÃO: Usa conta Stripe da clínica
+            $clinicStripeService = \App\Services\StripeService::forTenant($tenantId);
+            
             // Primeiro, verifica se o produto existe e pertence ao tenant
-            $product = $this->stripeService->getProduct($id);
+            $product = $clinicStripeService->getProduct($id);
             
             if (isset($product->metadata->tenant_id) && (string)$product->metadata->tenant_id !== (string)$tenantId) {
                 ResponseHelper::sendNotFoundError('Produto', ['product_id' => $id, 'tenant_id' => $tenantId]);
@@ -446,7 +616,33 @@ class ProductController
                 $data['metadata']['tenant_id'] = $tenantId;
             }
 
-            $product = $this->stripeService->updateProduct($id, $data);
+            $product = $clinicStripeService->updateProduct($id, $data);
+
+            // ✅ CORREÇÃO: Invalida cache de produtos após atualizar
+            $clinicStripeService->invalidateProductsCache();
+            
+            // ✅ CORREÇÃO: Limpa cache do CacheService (Redis/Memória) para este tenant
+            try {
+                $redis = \App\Services\CacheService::getRedisClient();
+                if ($redis) {
+                    // Busca todas as chaves de cache de produtos deste tenant
+                    $keys = $redis->keys('products:list:' . $tenantId . ':*');
+                    if (!empty($keys)) {
+                        $redis->del($keys);
+                        Logger::debug("Cache de produtos invalidado após atualização", [
+                            'tenant_id' => $tenantId,
+                            'product_id' => $id,
+                            'keys_deleted' => count($keys)
+                        ]);
+                    }
+                }
+            } catch (\Exception $e) {
+                Logger::warning("Erro ao invalidar cache de produtos (Redis)", [
+                    'tenant_id' => $tenantId,
+                    'product_id' => $id,
+                    'error' => $e->getMessage()
+                ]);
+            }
 
             ResponseHelper::sendSuccess([
                 'id' => $product->id,
@@ -496,18 +692,44 @@ class ProductController
                 return;
             }
 
+            // ✅ CORREÇÃO: Usa conta Stripe da clínica
+            $clinicStripeService = \App\Services\StripeService::forTenant($tenantId);
+            
             // Primeiro, verifica se o produto existe e pertence ao tenant
-            $product = $this->stripeService->getProduct($id);
+            $product = $clinicStripeService->getProduct($id);
             
             if (isset($product->metadata->tenant_id) && (string)$product->metadata->tenant_id !== (string)$tenantId) {
                 ResponseHelper::sendNotFoundError('Produto', ['product_id' => $id, 'tenant_id' => $tenantId]);
                 return;
             }
 
-            $product = $this->stripeService->deleteProduct($id);
+            $product = $clinicStripeService->deleteProduct($id);
 
-            // Invalida cache de produtos após deletar
-            $this->stripeService->invalidateProductsCache();
+            // ✅ CORREÇÃO: Invalida cache de produtos após deletar
+            $clinicStripeService->invalidateProductsCache();
+            
+            // ✅ CORREÇÃO: Limpa cache do CacheService (Redis/Memória) para este tenant
+            try {
+                $redis = \App\Services\CacheService::getRedisClient();
+                if ($redis) {
+                    // Busca todas as chaves de cache de produtos deste tenant
+                    $keys = $redis->keys('products:list:' . $tenantId . ':*');
+                    if (!empty($keys)) {
+                        $redis->del($keys);
+                        Logger::debug("Cache de produtos invalidado após exclusão", [
+                            'tenant_id' => $tenantId,
+                            'product_id' => $id,
+                            'keys_deleted' => count($keys)
+                        ]);
+                    }
+                }
+            } catch (\Exception $e) {
+                Logger::warning("Erro ao invalidar cache de produtos (Redis)", [
+                    'tenant_id' => $tenantId,
+                    'product_id' => $id,
+                    'error' => $e->getMessage()
+                ]);
+            }
 
             // Verifica se foi deletado ou apenas desativado
             $wasDeleted = isset($product->deleted) && $product->deleted === true;

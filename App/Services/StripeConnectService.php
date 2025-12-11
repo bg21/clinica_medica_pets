@@ -175,5 +175,143 @@ class StripeConnectService
         $account = $this->accountModel->findByTenant($tenantId);
         return $account ? $account['stripe_account_id'] : null;
     }
+
+    /**
+     * Cria link de login para conta Connect existente
+     * 
+     * Permite que o tenant acesse o dashboard Stripe da sua conta Connect
+     * sem precisar fazer login manualmente.
+     * 
+     * @param int $tenantId ID do tenant
+     * @return array Dados do link de login
+     * @throws \RuntimeException Se a conta Connect não for encontrada
+     */
+    public function createLoginLink(int $tenantId): array
+    {
+        $account = $this->accountModel->findByTenant($tenantId);
+        
+        if (!$account || !$account['stripe_account_id']) {
+            throw new \RuntimeException("Conta Stripe Connect não encontrada");
+        }
+        
+        try {
+            $loginLink = $this->stripeService->getClient()->accounts->createLoginLink(
+                $account['stripe_account_id']
+            );
+            
+            Logger::info("Link de login Stripe Connect criado", [
+                'tenant_id' => $tenantId,
+                'stripe_account_id' => $account['stripe_account_id'],
+                'expires_at' => $loginLink->expires_at
+            ]);
+            
+            return [
+                'login_url' => $loginLink->url,
+                'expires_at' => $loginLink->expires_at
+            ];
+        } catch (\Stripe\Exception\ApiErrorException $e) {
+            Logger::error("Erro ao criar link de login Stripe Connect", [
+                'tenant_id' => $tenantId,
+                'stripe_account_id' => $account['stripe_account_id'] ?? null,
+                'error' => $e->getMessage()
+            ]);
+            throw new \RuntimeException("Erro ao criar link de login: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Obtém saldo da conta Connect
+     * 
+     * Retorna o saldo disponível e pendente da conta Stripe Connect do tenant.
+     * 
+     * @param int $tenantId ID do tenant
+     * @return array Dados do saldo (available, pending, currency)
+     * @throws \RuntimeException Se a conta Connect não for encontrada
+     */
+    public function getBalance(int $tenantId): array
+    {
+        $account = $this->accountModel->findByTenant($tenantId);
+        
+        if (!$account || !$account['stripe_account_id']) {
+            throw new \RuntimeException("Conta Stripe Connect não encontrada");
+        }
+        
+        try {
+            // ✅ CORREÇÃO: Usa forConnectAccount para operar em nome da conta Connect
+            $stripeService = StripeService::forConnectAccount($account['stripe_account_id']);
+            $balance = $stripeService->getClient()->balance->retrieve();
+            
+            Logger::debug("Saldo da conta Stripe Connect obtido", [
+                'tenant_id' => $tenantId,
+                'stripe_account_id' => $account['stripe_account_id'],
+                'available' => $balance->available[0]->amount ?? 0,
+                'pending' => $balance->pending[0]->amount ?? 0
+            ]);
+            
+            return [
+                'available' => $balance->available[0]->amount ?? 0,
+                'pending' => $balance->pending[0]->amount ?? 0,
+                'currency' => $balance->available[0]->currency ?? 'brl'
+            ];
+        } catch (\Stripe\Exception\ApiErrorException $e) {
+            Logger::error("Erro ao obter saldo da conta Stripe Connect", [
+                'tenant_id' => $tenantId,
+                'stripe_account_id' => $account['stripe_account_id'] ?? null,
+                'error' => $e->getMessage()
+            ]);
+            throw new \RuntimeException("Erro ao obter saldo: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Lista transferências da conta Connect
+     * 
+     * Retorna as transferências realizadas para a conta Stripe Connect do tenant.
+     * 
+     * @param int $tenantId ID do tenant
+     * @param array $options Opções de filtro (limit, starting_after, ending_before, etc)
+     * @return array Lista de transferências formatadas
+     * @throws \RuntimeException Se a conta Connect não for encontrada
+     */
+    public function listTransfers(int $tenantId, array $options = []): array
+    {
+        $account = $this->accountModel->findByTenant($tenantId);
+        
+        if (!$account || !$account['stripe_account_id']) {
+            throw new \RuntimeException("Conta Stripe Connect não encontrada");
+        }
+        
+        try {
+            // ✅ CORREÇÃO: Usa forConnectAccount para operar em nome da conta Connect
+            $stripeService = StripeService::forConnectAccount($account['stripe_account_id']);
+            $transfers = $stripeService->getClient()->transfers->all($options);
+            
+            Logger::debug("Transferências da conta Stripe Connect listadas", [
+                'tenant_id' => $tenantId,
+                'stripe_account_id' => $account['stripe_account_id'],
+                'count' => count($transfers->data)
+            ]);
+            
+            return array_map(function($transfer) {
+                return [
+                    'id' => $transfer->id,
+                    'amount' => $transfer->amount,
+                    'currency' => $transfer->currency,
+                    'status' => $transfer->status,
+                    'destination' => $transfer->destination ?? null,
+                    'description' => $transfer->description ?? null,
+                    'created' => date('Y-m-d H:i:s', $transfer->created),
+                    'metadata' => $transfer->metadata->toArray() ?? []
+                ];
+            }, $transfers->data);
+        } catch (\Stripe\Exception\ApiErrorException $e) {
+            Logger::error("Erro ao listar transferências da conta Stripe Connect", [
+                'tenant_id' => $tenantId,
+                'stripe_account_id' => $account['stripe_account_id'] ?? null,
+                'error' => $e->getMessage()
+            ]);
+            throw new \RuntimeException("Erro ao listar transferências: " . $e->getMessage());
+        }
+    }
 }
 

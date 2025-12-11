@@ -8,6 +8,7 @@ use App\Models\Customer;
 use App\Models\Professional;
 use App\Utils\ResponseHelper;
 use App\Services\StripeService;
+use App\Traits\HasModuleAccess;
 use Flight;
 use Config;
 
@@ -16,6 +17,9 @@ use Config;
  */
 class ClinicReportController
 {
+    use HasModuleAccess;
+    
+    private const MODULE_ID = 'reports';
     /**
      * Relatório de consultas por período
      * GET /v1/clinic/reports/appointments
@@ -27,6 +31,11 @@ class ClinicReportController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'appointments_report']);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "reports"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             
@@ -241,6 +250,11 @@ class ClinicReportController
                 return;
             }
             
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "reports"
+            if (!$this->checkModuleAccess()) {
+                return;
+            }
+            
             // Vacinações são agendamentos do tipo "vacinação" que estão pendentes
             $appointmentModel = new Appointment();
             $db = \App\Utils\Database::getInstance();
@@ -298,6 +312,11 @@ class ClinicReportController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'financial_report']);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "reports"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             
@@ -424,6 +443,11 @@ class ClinicReportController
             
             if ($tenantId === null) {
                 ResponseHelper::sendUnauthorizedError('Não autenticado', ['action' => 'top_pets_report']);
+                return;
+            }
+            
+            // ✅ NOVO: Verifica se o tenant tem acesso ao módulo "reports"
+            if (!$this->checkModuleAccess()) {
                 return;
             }
             

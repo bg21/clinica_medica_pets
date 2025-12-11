@@ -234,7 +234,9 @@ function validateForm(form, validators) {
  */
 
 // Padrões de validação para cada tipo de ID do Stripe
-const STRIPE_ID_PATTERNS = {
+// Protege contra redeclaração (caso o script seja carregado múltiplas vezes)
+if (typeof window.STRIPE_ID_PATTERNS === 'undefined') {
+    window.STRIPE_ID_PATTERNS = {
     price_id: /^price_[a-zA-Z0-9]+$/,
     product_id: /^prod_[a-zA-Z0-9]+$/,
     customer_id: /^cus_[a-zA-Z0-9]+$/,
@@ -254,6 +256,7 @@ const STRIPE_ID_PATTERNS = {
     dispute_id: /^dp_[a-zA-Z0-9]+$/,
     balance_transaction_id: /^txn_[a-zA-Z0-9]+$/
 };
+} // Fecha if (typeof window.STRIPE_ID_PATTERNS === 'undefined')
 
 /**
  * Valida um ID do Stripe
@@ -277,7 +280,7 @@ function validateStripeId(value, type, required = false) {
     const trimmedValue = value.trim();
     
     // Obtém o padrão para o tipo
-    const pattern = STRIPE_ID_PATTERNS[type];
+    const pattern = window.STRIPE_ID_PATTERNS[type];
     if (!pattern) {
         // Se não há padrão específico, valida formato genérico Stripe (prefixo_xxxxx)
         const genericPattern = /^[a-z]+_[a-zA-Z0-9]+$/;
